@@ -22,357 +22,77 @@ dsca <- DBI::dbConnect(RPostgres::Postgres(), host='localhost', user=user, dbnam
 
 ## ANALYSIS
 
-
-### Prepare the lab tables
-
-Run the following script to create the denormalized table for lab_scc and lab_epic. After this step, we should have three tables for SCC lab, EPIC lab, and combined. And each table should have LOINC and mapped HPO. 
 ```{r}
-# sql_folder_path <- '/Users/xingminzhang/git/s4-pd-dmsdw/pd-dmsdw-loinc2hpo-app/src/main/resources/sql'
-# sql_denormalized_scc_lab_2020july <- read_file(glue('{sql_folder_path}/loinc2hpo_SCC_MSDW.sql'))
-# sql_denormalized_epic_lab_2020july <- read_file(glue('{sql_folder_path}/loinc2hpo_Epic_MSDW.sql'))
-# sql_combine_Epic_SCC <- read_file(glue('{sql_folder_path}/loinc2hpo_combine_Epic_SCC.sql')) 
-# 
-# # make sure the lab table after LOINC2HPO transformation exists
-# # if not, we can create it here; but the intended behavior is that we use the Java commandline app for this
-
-```
-
-
-```{sql connection=dsca, echo=FALSE}
-drop table if exists denormalized_scc_lab_2020july;
-```
-```{sql connection=dsca}
-CREATE TEMP TABLE denormalized_scc_lab_2020july as
-WITH 
-	lab_scc_2020q2 as (
-		SELECT l.medical_record_number , l.encounter_key , l.calendar_date , l.time_of_day_key , l.clinical_result_numeric ,  trim(from l.unit_of_measure_numeric) as unit_of_measure_numeric , l.reference_range , l.procedure_key,
-		case when l.abnormal_flag is null then 'N' else l.abnormal_flag end as abnormal_flag 
-		FROM hai_az_prod.lab_scc_2020july l
-		--where medical_record_number in (2966097, 3164683, 3869795)
-	), 
-	lab_scc_abnormal_flag_mapping AS (
-		SELECT case when abf.abnormal_flag is NULL then 'N' else abf.abnormal_flag end as abnormal_flag, abf.mapto 
-		FROM hai_az_prod.lab_scc_abnormal_flag_mapping abf
-	)
-SELECT lab.medical_record_number, lab.encounter_key , lab.calendar_date  as lab_date, dtod.clock_time_24_hour || ':00' as lab_time, lab.clinical_result_numeric , fdp.context_name, fdp.context_procedure_code AS local_test_code , loinc.loinc , lab.clinical_result_numeric AS lab_result_numeric_value, lab.unit_of_measure_numeric As unit_of_measure ,lab.reference_range AS normal_range , lab.abnormal_flag , abf.mapto AS interpretation, l2h.hpotermid , l2h.isnegated 
-FROM lab_scc_2020q2 lab 
-left JOIN hai_az_prod.fd_procedure fdp using (procedure_key)
-left JOIN hai_az_prod.loinc_mapping loinc on fdp.context_procedure_code = loinc.code and (lab.unit_of_measure_numeric = loinc.unit or (lab.unit_of_measure_numeric is NULL and loinc.unit is NULL))
-left JOIN lab_scc_abnormal_flag_mapping abf using (abnormal_flag)
-left JOIN hai_az_prod.loinc2hpo l2h on loinc.loinc = l2h.loincid and abf.mapto = l2h.code
-join prod_msdw.d_time_of_day dtod using (time_of_day_key);
-```
-
-```{sql connection=dsca}
-DROP TABLE IF EXISTS denormalized_epic_lab_2020july;
-```
-
-```{sql connection=dsca}
-create temp table denormalized_epic_lab_2020july as
-with interpreted as (
-	SELECT lab.mrn, lab.order_date , lab.lab_time , lab.test_code , lab.test_result_value , lab.unit_of_measurement , lab.reference_range ,
-	case 
-			when test_result_value_final :: REAL < range_low_final ::REAL then 'L' 
-			when test_result_value_final :: REAL > range_hi_final :: REAL then 'H'
-			else 'N' 
-	end as interpretation
-	FROM hai_az_test.lab_epic_2020july lab
-	--where mrn in (3710567, 8014250, 3144637)
-	)
-SELECT lab.mrn AS medical_record_number, NULL AS encounter_key, lab.order_date as lab_date, lab.lab_time, 'EPIC' AS context_name, lab.test_code AS local_test_code , local2loinc.loinc , lab.test_result_value AS lab_result_numeric_value, lab.unit_of_measurement AS unit_of_measure , lab.reference_range AS normal_range , NULL AS abnormal_flag,  interpretation,
-loinc2hpo.hpotermid , loinc2hpo.isnegated 
-FROM interpreted lab
-LEFT JOIN hai_az_prod.loinc_mapping local2loinc on lab.test_code :: VARCHAR = local2loinc.code and (lab.unit_of_measurement = local2loinc.unit OR (lab.unit_of_measurement is NULL and local2loinc.unit is NULL))
-LEFT JOIN hai_az_prod.loinc2hpo loinc2hpo on local2loinc.loinc = loinc2hpo.loincid and interpretation = loinc2hpo.code 
-where local2loinc."source" = 'EPIC'; 
-```
-
-Join the above tables together
-```{sql connection=dsca}
-CREATE VIEW denormalized_scc_and_epic_lab_2020july AS
-WITH epic_denormalized AS (
-  SELECT medical_record_number, lab_date, lab_time, context_name, local_test_code :: VARCHAR, loinc,  lab_result_numeric_value, unit_of_measure, normal_range, interpretation, hpotermid, isnegated
-  FROM denormalized_epic_lab_2020july
-), 
-scc_denormalized AS (
-  SELECT medical_record_number, lab_date, lab_time, context_name, local_test_code, loinc, lab_result_numeric_value, unit_of_measure, normal_range, interpretation, hpotermid, isnegated
-  FROM denormalized_scc_lab_2020july
-)
-SELECT * FROM scc_denormalized 
-UNION all 
-SELECT * FROM epic_denormalized; 
-```
-
-
-Right now, we have three sets of denormalized labs, SCC, EPIC and their union.
-```{sql connection=dsca}
-SELECT * FROM denormalized_scc_lab_2020july limit 4;
-```
-
-```{sql connection=dsca}
-SELECT * FROM denormalized_epic_lab_2020july limit 4;
-```
-
-
-```{r}
-lab_tables <- c('denormalized_scc_lab_2020july', 'denormalized_epic_lab_2020july', 'denormalized_scc_and_epic_lab_2020july')
-```
-
-
-### Summary statistics before running any HPO inference
-
-```{r}
-abnormal_phenotypes_before_inference <- function(lab_table_name){
-  results <- list()
-  dbExecute(dsca, 'DROP TABLE IF EXISTS n_abnormal_before_infer_per_patient;')
-  sql <- glue::glue('create temp table n_abnormal_before_infer_per_patient AS
-        SELECT medical_record_number , count(*) as n_abnormal_before_infer, count(distinct hpotermid ) as n_uniq_abnormal_before_infer
-        FROM {lab_table_name}
-        where hpotermid is not null and not isnegated
-        group by medical_record_number ;')
-  dbExecute(dsca, sql)    
-  # median of HPO-coded phenotypes per patient from abnormal lab findings
-  median_abnormal_hpo <- dbGetQuery(dsca, 'SELECT median(n_abnormal_before_infer) FROM n_abnormal_before_infer_per_patient;')[1,1]
-  results$n_abnormal_before_infer <- median_abnormal_hpo
-  
-  # median of unique HPO-coded phenotypes per patient from abnormal lab findings
-  median_uniq_abnormal_before_infer <- dbGetQuery(dsca, 'SELECT median(n_uniq_abnormal_before_infer) FROM n_abnormal_before_infer_per_patient;')[1,1]
-  results$n_uniq_abnormal_before_infer <- median_uniq_abnormal_before_infer
-  
-  n_abnormal_before_infer_per_patient <- dbGetQuery(dsca, 
-        'SELECT n_abnormal_before_infer, count(*) as n_patient 
-      FROM n_abnormal_before_infer_per_patient
-      GROUP BY n_abnormal_before_infer
-      order by n_abnormal_before_infer;')
-  results$n_abnormal_before_infer_per_patient <- n_abnormal_before_infer_per_patient
-  
-  n_uniq_abnormal_before_infer_per_patient <- dbGetQuery(dsca, 
-          'SELECT n_uniq_abnormal_before_infer, count(*) as n_patient 
-            FROM n_abnormal_before_infer_per_patient
-            GROUP BY n_uniq_abnormal_before_infer
-            order by n_uniq_abnormal_before_infer;')
-  results$n_uniq_abnormal_before_infer_per_patient <- n_uniq_abnormal_before_infer_per_patient
-  
-  return (results)
+CACHE_DIR = 'cache'
+if (!dir.exists(CACHE_DIR)){
+  dir.create(CACHE_DIR)
 }
 
-# the input is the third item in the above function
-plot_patient_distribution_by_n_abnormal_phenotypes_before_infer <- function(df){
-  n_abnormal_before_infer_per_patient <- df
-  n_abnormal_before_infer_per_patient <- n_abnormal_before_infer_per_patient %>% mutate(n_abnormal_before_infer = as.integer(n_abnormal_before_infer), n_patient = as.integer(n_patient))
+get_db_data <- function(sql, df_path, force_rerun=FALSE, cache_dir=CACHE_DIR){
+  if (force_rerun | !file.exists(df_path)){
+    df <- dbGetQuery(dsca, sql)
+    write.csv(df, file = df_path, row.names=FALSE)
+  }
+  
+  df <- read.csv(df_path)
+  
+  return (df)
+}
+```
 
-## roll up the ones > 100
-  df_temp <- n_abnormal_before_infer_per_patient %>% mutate(n_abnormal_before_infer = ifelse(n_abnormal_before_infer > 100, 100, n_abnormal_before_infer)) %>% group_by(n_abnormal_before_infer) %>% summarise(n_patient = sum(n_patient))
+
+### Analyze changes of observed phenotypes
+We will used the persisted lab test table for this analysis. 
+```{r}
+get_phenotype_rank_all_by_year <- function(force_rerun=FALSE, cache_dir=CACHE_DIR){
+  df_path = glue('{cache_dir}/observed_phenotype_rank_all_by_year.csv')
   
-  p <- ggplot(df_temp) + 
-    geom_bar(aes(x=n_abnormal_before_infer, y = n_patient), stat='identity') +
-    scale_x_continuous(limits = c(0, 105)) + 
-    xlab("# HPO-coded phenotypes") + ylab("patient count") + 
-    ggtitle("before HPO inference") +
-    theme(axis.text = element_text(size = 8), title = element_text(size = 10))
+  if (force_rerun | !file.exists(df_path)){
+    df <- dbGetQuery(dsca, "
+      with abnormal_lab as 
+      	(select * from hai_az_prod.scc_and_epic_lab_after_loinc2hpo_2020july lab where hpotermid is not null and not isnegated),
+      abnormal_lab_after_infer as 
+      	(SELECT l.medical_record_number, l.lab_date, date_part(year, lab_date) as lab_year, l.local_test_code, l.loinc, l.hpotermid, l.isnegated, pair.ancestor , pair.distance
+      	FROM abnormal_lab l 
+      	left join hai_az_prod.hpo_is_a_pairs pair on l.hpotermid = pair.current),
+      lab_freq_by_year as (
+      	select ancestor as termid, lab_year, count(*) as n_record, count(distinct medical_record_number) as n_patient from abnormal_lab_after_infer group by ancestor, lab_year
+      )
+      select *
+      from lab_freq_by_year
+      join hai_az_prod.hpo h using (termid)
+      order by lab_year, distancetoroot;")
+    
+    write.csv(df, file = df_path, row.names=FALSE)
+  }
   
-  rm(df_temp)
+  df <- read.csv(df_path)
+  
+  return (df)
+}
+
+phenotype_rank_all_by_year <- get_phenotype_rank_all_by_year()
+```
+
+
+```{r}
+plot_phenotypes_of_interest_by_year <- function(terms_of_interest, df){
+  hpo_terms_selected <- df %>% filter(termid %in% terms_of_interest) %>% select(termid, label) %>% distinct()
+
+  p <- df %>% filter(termid %in% terms_of_interest) %>% 
+    filter(lab_year <= 2019 & lab_year > 2000) %>%
+    ggplot(aes(x = lab_year, y = n_patient, group = termid, color = termid)) + 
+    geom_point() +
+    geom_line() +
+    scale_color_discrete(breaks = hpo_terms_selected$termid, labels = str_c(hpo_terms_selected$termid, hpo_terms_selected$label, sep = " "))
+  
   return (p)
 }
 
-plot_patient_distribution_by_n_uniq_abnormal_phenotypes_before_infer <- function(df){
-  n_uniq_abnormal_before_infer_per_patient <- df
-  n_uniq_abnormal_before_infer_per_patient <- n_uniq_abnormal_before_infer_per_patient %>% 
-  mutate(n_uniq_abnormal_before_infer = as.integer(n_uniq_abnormal_before_infer), n_patient = as.integer(n_patient))
-
-  p <- ggplot(n_uniq_abnormal_before_infer_per_patient) + 
-    geom_bar(aes(x=n_uniq_abnormal_before_infer, y = n_patient), stat='identity') +
-    scale_x_continuous(limits = c(0, 105)) +
-    xlab("# HPO-coded phenotypes (unique)") + ylab("patient count") + 
-    ggtitle("before HPO inference") +
-    theme(axis.text = element_text(size = 8), title = element_text(size = 10))
-  
-  return (p)
-}
+hpo_level_1_terms <- phenotype_rank_all_by_year %>% filter(distancetoroot == 1) %>% select(termid, label) %>% distinct()
+plot_phenotypes_of_interest_by_year(terms_of_interest = hpo_level_1_terms$termid, df=phenotype_rank_all_by_year)
 ```
 
-```{r}
-results_before_infer <- lapply(lab_tables, function(x) abnormal_phenotypes_before_inference(x))
-```
-
-Median of # of abnormal phenotypes before running HPO inference
-```{r}
-as.data.frame(list(lab_source = lab_tables, median_abnormal = sapply(results_before_infer, function(x) x$n_abnormal_before_infer), median_uniq_abnormal = sapply(results_before_infer, function(x) x$n_uniq_abnormal_before_infer)) )
-```
-
-
-What are most prevalent abnormal phenotypes? "Prevalent" is defined as unique number of patients having an abnormal phenotype. 
-```{sql connection=dsca, max.output=-1}
-SELECT l.hpotermid, hpo.label, l.n :: INTEGER
-FROM 
-      (SELECT hpotermid , count(distinct medical_record_number) as n
-      FROM denormalized_scc_and_epic_lab_2020july
-      WHERE hpotermid is not null and not isnegated
-      group by hpotermid 
-      order by n desc
-      LIMIT 50) as l
-LEFT JOIN hai_az_prod.hpo hpo on l.hpotermid = hpo.termid ;
-```
-
-
-### Summary statistics after running HPO inference
-
-Count the number of HPO phenotypes per patient after inference. Note inference was only done for abnormal labs. It is tricky to infer based on normal findings. 
-
-```{r}
-abnormal_phenotypes_after_inference <- function(lab_table_name){
-  results <- list()
-  dbExecute(dsca, 'DROP TABLE IF EXISTS n_abnormal_with_inferred_per_patient;')
-  sql <- glue::glue('create temp table n_abnormal_with_inferred_per_patient AS
-with abnormal_lab as 
-	(SELECT * FROM {lab_table_name} where hpotermid is not null and not isnegated),
-abnormal_lab_after_infer as 
-	(SELECT l.medical_record_number, l.lab_date, l.local_test_code, l.loinc, l.hpotermid, l.isnegated, pair.ancestor , pair.distance 
-	FROM abnormal_lab l 
-	left join hai_az_prod.hpo_is_a_pairs pair on l.hpotermid = pair."current")
-SELECT medical_record_number, count(*) as n_abnormal_with_inferred, count(DISTINCT ancestor) as n_uniq_abnormal_with_inferred
-FROM abnormal_lab_after_infer 
-group by medical_record_number;')
-  dbExecute(dsca, sql)    
-  # median of HPO-coded phenotypes per patient from abnormal lab findings
-  median_abnormal_hpo <- dbGetQuery(dsca, 'SELECT median(n_abnormal_with_inferred) FROM n_abnormal_with_inferred_per_patient;')[1,1]
-  results$n_abnormal_after_infer <- median_abnormal_hpo
-  
-  # median of unique HPO-coded phenotypes per patient from abnormal lab findings
-  median_uniq_abnormal_after_infer <- dbGetQuery(dsca, 'SELECT median(n_uniq_abnormal_with_inferred) FROM n_abnormal_with_inferred_per_patient;')[1,1]
-  results$n_uniq_abnormal_after_infer <- median_uniq_abnormal_after_infer
-  
-  n_abnormal_after_infer_per_patient <- dbGetQuery(dsca, 
-        'SELECT n_abnormal_with_inferred, count(*) as n_patient 
-        FROM n_abnormal_with_inferred_per_patient 
-        group by n_abnormal_with_inferred 
-        order by n_abnormal_with_inferred;')
-  results$n_abnormal_before_infer_per_patient <- n_abnormal_after_infer_per_patient
-  
-  n_uniq_abnormal_after_infer_per_patient <- dbGetQuery(dsca, 
-          'SELECT n_uniq_abnormal_with_inferred, count(*) as n_patient 
-          FROM n_abnormal_with_inferred_per_patient 
-          group by n_uniq_abnormal_with_inferred 
-          order by n_uniq_abnormal_with_inferred;')
-  results$n_uniq_abnormal_before_infer_per_patient <- n_uniq_abnormal_after_infer_per_patient
-  
-  dbExecute(dsca, 'DROP TABLE IF EXISTS n_abnormal_with_inferred_per_patient;')
-  
-  return (results)
-}
-
-# the input is the third item in the above function
-plot_patient_distribution_by_n_abnormal_phenotypes_after_infer <- function(df){
-  n_abnormal_with_inferred_per_patient <- df
-  n_abnormal_with_inferred_per_patient <- n_abnormal_with_inferred_per_patient %>% mutate(n_abnormal_with_inferred = as.integer(n_abnormal_with_inferred), n_patient = as.integer(n_patient))
-n_abnormal_with_inferred_per_patient %>% head()
-
-  MAX_N_ABNORMAL_WITH_INFERRED <- max(n_abnormal_with_inferred_per_patient$n_abnormal_with_inferred)
-  df_temp <- n_abnormal_with_inferred_per_patient %>% mutate(strata = cut(n_abnormal_with_inferred_per_patient$n_abnormal_with_inferred, breaks = c(seq(0,100, 10), seq(101, 1001, 100), seq(1002, MAX_N_ABNORMAL_WITH_INFERRED + 30000, 30000)))) %>% group_by(strata) %>% summarise(n_patient = sum(n_patient))
-  
-  p <- ggplot(df_temp) +
-    geom_bar(aes(x = strata, y = n_patient), stat = 'identity') + theme(axis.text.x = element_text(angle = 30)) +
-    xlab("# HPO-coded phenotypes") + ylab("patient count") + 
-    ggtitle("after HPO inference") +
-    theme(axis.text = element_text(size = 4), title = element_text(size = 10))
-  
-  rm(df_temp)
-  return (p)
-}
-
-plot_patient_distribution_by_n_uniq_abnormal_phenotypes_after_infer <- function(df){
-  n_uniq_abnormal_with_inferred_per_patient <- df
-  n_uniq_abnormal_with_inferred_per_patient <- n_uniq_abnormal_with_inferred_per_patient %>% mutate(n_uniq_abnormal_with_inferred = as.integer(n_uniq_abnormal_with_inferred), n_patient = as.integer(n_patient))
-
-  MAX_N_ABNORMAL_WITH_INFERRED <- max(n_uniq_abnormal_with_inferred_per_patient$n_uniq_abnormal_with_inferred)
-  df_temp <- n_uniq_abnormal_with_inferred_per_patient %>% mutate(strata = cut(n_uniq_abnormal_with_inferred, breaks = c(seq(0,100, 10), seq(101, 1001, 100), seq(1002, MAX_N_ABNORMAL_WITH_INFERRED + 30000, 30000)))) %>% group_by(strata) %>% summarise(n_patient = sum(n_patient))
-  
-  p <- ggplot(df_temp) +
-    geom_bar(aes(x = strata, y = n_patient), stat = 'identity') + theme(axis.text.x = element_text(angle = 45)) +
-    xlab("# HPO-coded phenotypes (unique)") + ylab("patient count") + 
-    ggtitle("after HPO inference") +
-    theme(axis.text = element_text(size = 4), title = element_text(size = 10))
-  rm(df_temp)
-  
-  return (p)
-}
-```
-
-```{r}
-results_after_infer <- lapply(lab_tables, abnormal_phenotypes_after_inference)
-```
-
-```{r}
-as.data.frame(list(lab_source = lab_tables, median_abnormal = sapply(results_after_infer, function(x) x$n_abnormal_after_infer), median_uniq_abnormal = sapply(results_after_infer, function(x) x$n_uniq_abnormal_after_infer)) )
-```
-
-
-### Show patient distribution plots before and after inference on one plot
-
-```{r}
-# input is the list item in results_before_infer, and results_after_infer
-plot_grid <- function(result_before_infer, result_after_infer){
-  # patient distribution ~ abnormal phenotypes before inference
-  df_abnormal_before <- result_before_infer[[3]]
-  p1 <- plot_patient_distribution_by_n_abnormal_phenotypes_before_infer(df_abnormal_before)
-  # patient distribution ~ uniq abnormal phenotypes before inference
-  df_uniq_abnormal_before <- result_before_infer[[4]]
-  p2 <- plot_patient_distribution_by_n_uniq_abnormal_phenotypes_before_infer(df_uniq_abnormal_before)
-  # patient distribution ~ abnormal phenotypes after inference
-  df_abnormal_after <- result_after_infer[[3]]
-  p3 <- plot_patient_distribution_by_n_abnormal_phenotypes_after_infer(df_abnormal_after)
-  # patient distribution ~ uniq abnormal phenotypes after inference
-  df_uniq_abnormal_after <- result_after_infer[[4]]
-  p4 <- plot_patient_distribution_by_n_uniq_abnormal_phenotypes_after_infer(df_uniq_abnormal_after)
-  
-  width = unit(8, "cm")
-  height = unit(3, "cm")
-  p <- gridExtra::grid.arrange(
-    set_panel_size(p1, width = width, height = height),
-    set_panel_size(p2, width = width, height = height),
-    set_panel_size(p3, width = width, height = height),
-    set_panel_size(p4, width = width, height = height),
-    ncol=2)
-  
-  return (p)
-}
-```
-
-Patient distribution by looking at SCC labs alone
-```{r}
-# Lab_SCC
-plot_grid(results_before_infer[[1]], results_after_infer[[1]])
-```
-
-Patient distribution by looking at EPIC labs alone
-```{r}
-# Lab_EPIC
-plot_grid(results_before_infer[[2]], results_after_infer[[2]])
-```
-
-Patient distribution by looking at all labs combined
-```{r}
-# Lab_SCC_and_EPIC
-plot_grid(results_before_infer[[3]], results_after_infer[[3]])
-```
-
-We can also look at the most prevalent phenotypes after inference. It is not fair to compare all labs because parent terms are always going to be more prevalent. So we just look at level 1 terms (terms right below "Phenotypic Abnormality").
-Look at patients at level = 1 (right below phenotypic abnormality)
-```{sql connection=dsca, max.output=-1}
-with abnormal_lab as 
-	(SELECT * FROM denormalized_scc_and_epic_lab_2020july where hpotermid is not null and not isnegated),
-abnormal_lab_after_infer as 
-	(SELECT l.medical_record_number, l.lab_date, l.local_test_code, l.loinc, l.hpotermid, l.isnegated, pair.ancestor , pair.distance , hpo.distancetoroot, hpo.label
-	FROM abnormal_lab l 
-	left join hai_az_prod.hpo_is_a_pairs pair on l.hpotermid = pair."current"
-	left join hai_az_prod.hpo hpo on pair.ancestor = hpo.termid)
-SELECT ancestor, label, count(distinct medical_record_number) :: INTEGER as n_patient FROM abnormal_lab_after_infer where distancetoroot = 1 group by ancestor, label
-ORDER BY n_patient DESC;
-```
-
-```{sql connection=dsca}
-DROP VIEW IF EXISTS denormalized_scc_and_epic_lab_2020july;
-```
 
 
 ### Analyze the tested phenotypes 
@@ -382,11 +102,6 @@ Whether a lab test is ordered or not can sometimes be very informative. In this 
 Some phenotypes can be directly tested, such as "Increased LDL cholesterol concentration". Other phenotypes can be inferred from directly testable phenotypes, such as "Abnormal Leukocyte count", which are inferred from specific tests on different blood cell counts. We collect the count of phenotypes directly tested, or including indirectly tested ones as well.
 
 ```{r}
-CACHE_DIR = 'cache'
-if (!dir.exists(CACHE_DIR)){
-  dir.create(CACHE_DIR)
-}
-
 get_tested_phenotype_rank_direct <- function(force_rerun=FALSE, cache_dir=CACHE_DIR){
   df_path = glue('{cache_dir}/tested_phenotype_rank_direct.csv')
   
@@ -577,50 +292,39 @@ get_tested_phenotype_rank_all_by_year <- function(force_rerun=FALSE, cache_dir=C
 }
 
 tested_phenotype_rank_all_by_year <- get_tested_phenotype_rank_all_by_year()
-
-plot_phenotypes_of_interest_by_year <- function(terms_of_interest, df = tested_phenotype_rank_all_by_year){
-  hpo_terms_selected <- df %>% filter(termid %in% terms_of_interest) %>% select(termid, label) %>% distinct()
-
-  p <- df %>% filter(termid %in% terms_of_interest) %>% 
-    filter(lab_year <= 2019 & lab_year > 2000) %>%
-    ggplot(aes(x = lab_year, y = n_patient, group = termid, color = termid)) + 
-    geom_point() +
-    geom_line() +
-    scale_color_discrete(breaks = hpo_terms_selected$termid, labels = str_c(hpo_terms_selected$termid, hpo_terms_selected$label, sep = " "))
-  
-  return (p)
-}
 ```
 
 ```{r}
 hpo_level_1_terms <- tested_phenotype_rank_all_by_year %>% filter(distancetoroot == 1) %>% select(termid, label) %>% distinct()
-plot_phenotypes_of_interest_by_year(terms_of_interest = hpo_level_1_terms$termid)
+plot_phenotypes_of_interest_by_year(terms_of_interest = hpo_level_1_terms$termid, df=tested_phenotype_rank_all_by_year)
 ```
 
 Some trends are pretty interesting, such as the spike of Abnormal cellular phenotype. The term has three children, but only one is tested: HP:0011017 Abnormal cellular physiology
 
 ```{r}
 children_abnormal_cellular_physiology <- c('HP:0003220', 'HP:0011018', 'HP:0025463', 'HP:0011019', 'HP:0003254', 'HP:4000056', 'HP:0011133', 'HP:0004371', 'HP:0031377', 'HP:0031409', 'HP:0012103', 'HP:0032576', 'HP:0003204', 'HP:0004356', 'HP:0032571', 'HP:0002916', 'HP:0003224', 'HP:0003575', 'HP:0003358')
-plot_phenotypes_of_interest_by_year(terms_of_interest = children_abnormal_cellular_physiology)
+plot_phenotypes_of_interest_by_year(terms_of_interest = children_abnormal_cellular_physiology, df=tested_phenotype_rank_all_by_year)
 ```
 
 Again, the above plot shows that it is driven by one HP:0031409 Abnormal lymphocyte physiology. 
 ```{r}
 children_of_interest <- c('HP:0011840', 'HP:0030886', 'HP:0012177', 'HP:0005372', 'HP:0031378')
-plot_phenotypes_of_interest_by_year(terms_of_interest = children_of_interest)
+plot_phenotypes_of_interest_by_year(terms_of_interest = children_of_interest, df=tested_phenotype_rank_all_by_year)
 ```
 ```{r}
 children_of_interest <- c('HP:0002847', 'HP:0002959', 'HP:0005384', 'HP:0041076', 'HP:0010701')
-plot_phenotypes_of_interest_by_year(terms_of_interest = children_of_interest)
+plot_phenotypes_of_interest_by_year(terms_of_interest = children_of_interest, df=tested_phenotype_rank_all_by_year)
 ```
 
 
 ```{r}
 children_of_interest <- c('HP:0010702', 'HP:0032336', 'HP:0410241', 'HP:0410240', 'HP:0410243', 'HP:0410242', 'HP:0410244', 'HP:0004313')
-plot_phenotypes_of_interest_by_year(terms_of_interest = children_of_interest)
+plot_phenotypes_of_interest_by_year(terms_of_interest = children_of_interest, df=tested_phenotype_rank_all_by_year)
 ```
 
 ```{r}
 children_of_interest <- c('HP:0410367', 'HP:0031047', 'HP:0003237', 'HP:0003212', 'HP:0003261', 'HP:0410369', 'HP:0410371', 'HP:0410246', 'HP:0003496')
-plot_phenotypes_of_interest_by_year(terms_of_interest = children_of_interest)
+plot_phenotypes_of_interest_by_year(terms_of_interest = children_of_interest, df=tested_phenotype_rank_all_by_year)
 ```
+
+
