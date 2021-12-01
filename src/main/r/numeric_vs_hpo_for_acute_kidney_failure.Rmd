@@ -1,6 +1,8 @@
 ---
 title: "R Notebook"
-output: html_notebook
+output:
+  html_document:
+    df_print: paged
 ---
 
 ## Goal
@@ -156,16 +158,16 @@ df_labs_and_outcomes <- df_labs %>% filter(loinc %in% c('2160-0', '3094-0', '629
   left_join(df_cohort, by = 'medical_record_number') %>%
   mutate(lab_date = ymd(lab_date), min_diag_date = ymd(min_diag_date)) %>%
   mutate(lab_date_rel_to_diag = as.duration(interval(min_diag_date, lab_date)) / ddays()) %>%
-  mutate(window_num = cut(lab_date_rel_to_diag, c(-Inf, -180, 0, Inf))) %>%
+  mutate(window_num = cut(lab_date_rel_to_diag, c(-Inf, -100, 0, Inf))) %>%
 ##select(medical_record_number, loinc, lab_date, min_diag_date, lab_date_rel_to_diag, window_num)
-  filter(window_num %in% c('(-Inf,-180]', '(-180,0]')) %>%
+  filter(window_num %in% c('(-Inf,-100]', '(-100,0]')) %>%
   arrange(medical_record_number, loinc, -lab_date_rel_to_diag) %>%
   group_by(medical_record_number, loinc, window_num) %>%
   mutate(sequence = row_number()) %>%
   #select(medical_record_number, loinc, lab_date, min_diag_date, lab_date_rel_to_diag, window_num, sequence) %>%
   ungroup() %>%
   filter(sequence == 1) %>%
-  mutate(outcome = if_else(window_num == '(-180,0]', 'abnormal', 'normal'))
+  mutate(outcome = if_else(window_num == '(-100,0]', 'abnormal', 'normal'))
 
 # the following shows that we have pretty balanced classes for each lab test
 df_labs_and_outcomes %>% group_by(loinc, outcome) %>% summarise(n = n())
@@ -265,7 +267,7 @@ pipeline_compare_for_outcome_prediction(df_one_loinc = df_one_loinc)
 ```
 
 
-```{r}
+```{r max.output=-1}
 require(furrr)
 plan(multisession, workers = 4)
 
@@ -280,7 +282,7 @@ kidney_analysis
 ```
 
 ```{r}
-df_one_loinc <- df_labs_and_outcomes %>% filter(loinc == '1742-6')
+df_one_loinc <- df_labs_and_outcomes %>% filter(loinc == '2160-0')
 
 df_hpo_features <- create_hpo_features(df_one_loinc = df_one_loinc)
 
@@ -292,8 +294,8 @@ df_test <- df_train_test$df_test
   
 lr_H <- lr_for_hpo_H(df_train = df_train, df_test = df_test)
 roc_comparison <- compare_rocs(lr_H[[5]], lr_H[[6]])
-roc_comparison <- bind_cols(roc_comparison, valid_lab_outcomes %>% filter(interpretation == 'H'))
-roc_comparisons$H <- roc_comparison
+roc_comparison <- bind_cols(roc_comparison)
+roc_comparison$H <- roc_comparison
 
 plot(lr_H[[5]])
 plot(lr_H[[6]])
