@@ -1,0 +1,403 @@
+---
+title: "R Notebook"
+output:
+  html_document:
+    df_print: paged
+---
+
+## Goal
+Compare the performance of raw lab values vs HPO interpretations for colorectal cancer.
+
+
+## Analysis
+
+### retrieve data
+```{r message=FALSE}
+library(tidyverse)
+library(glue)
+library(lubridate)
+library(readxl)
+require(DBI)
+require(RPostgres)
+require(egg)
+require(gridExtra)
+source('.db_credential.R')
+source('functions.R')
+dsca <- DBI::dbConnect(RPostgres::Postgres(), host='localhost', user=user, dbname = dbname, port = 2345, password=password)
+
+
+# cache directory to read from or write to
+CACHE_DIR <- './cache'
+if (!dir.exists(CACHE_DIR)){
+  dir.create(CACHE_DIR)
+}
+```
+
+
+Create a cohort for patients with colorectal cancer.
+```{r}
+sql <- read_file('../sql/colorectal_cancer_cohort.sql')
+print(sql)
+n<- dbExecute(dsca, sql)
+```
+
+
+Retrieve diagnoses information for the cohort.
+```{r}
+sql <- "SELECT * FROM cohort"
+df_cohort <- get_df_from_db_or_cache(cache_dir = CACHE_DIR, file_name = 'colorectal_cancer_diagnoses.csv', db_access_callback = dbGetQuery, conn = dsca, statement = sql, force_rerun = FALSE)
+
+df_cohort %>% nrow()
+```
+
+
+Retrieve related lab tests for the cohort. 
+```{r}
+sql <- read_file('../sql/get_labs_for_colorectal_cancer.sql')
+df_labs <- get_df_from_db_or_cache(cache_dir = CACHE_DIR, file_name = "labs_colorectal_cancer.csv", db_access_callback = dbGetQuery, conn=dsca, statement = sql, force_rerun = FALSE)
+df_labs %>% nrow()
+```
+
+The first thing is to check how do the raw values of lab test look like before diagnoses of abnormal liver function. We want to choose a time window during which the liver function labs are highly correlated with the diagnosis, and another time window well, which is before the first window and corresponds to a *normal* liver function labs. The plot below shows that roughly we can choose -180 as the time cutoff: within this time cutoff, i.e. (-180, 0) days, the latest lab test tends to be abnormal and correspond to an abnormal liver function diagnosis; outside of this time cutoff, i.e. 180 days before a known liver abnormal function diagnosis, the lab test tends to be normal.  
+```{r}
+plot_lab_raw_values_vs_rel_date <- function(lab_loinc, ylim=NULL){
+  df <- df_labs %>% 
+    filter(loinc == lab_loinc) %>% 
+    filter(rel_date <= 0 & rel_date > -730) %>% 
+    mutate(lab_result_numeric_value = as.numeric(lab_result_numeric_value))
+  
+  p <- ggplot(df, aes(x = rel_date, y = lab_result_numeric_value)) +
+    geom_point(size = 0.1, alpha=0.1) +
+    xlab('lab date (relative to diagnosis)')
+  
+  if (!is.null(ylim)){
+    p <- p + coord_cartesian(ylim = ylim)
+  }
+  
+  p <- p + theme_bw() + 
+    theme(panel.grid = element_blank(),
+          axis.text = element_text(size = 5),
+          axis.title = element_text(size = 8), 
+          strip.text.x = element_text(margin = margin(0.3, 0, 0.3, 0), size = 5),
+          plot.title = element_text(size = 8))
+  
+  return (p)
+}
+
+# setClass('LiverLab', representation(lab_loinc = 'character', lab_name = 'character', ylim_min = "numeric", ylim_max = "numeric"))
+# liver_lab_ALT <- new('LiverLab', lab_loinc = '1742-6', lab_name = 'Alanine aminotransferase', ylim_min = 0, ylim_max = 500)
+# liver_lab_GGT <- new('LiverLab', lab_loinc = '2324-2', lab_name = 'Gamma glutamyl transferase', ylim_min = 0, ylim_max = 1000)
+# liver_lab_AST <- new('LiverLab', lab_loinc = '1920-8', lab_name = 'Aspartate aminotransferase', ylim_min = 0, ylim_max = 500)
+# liver_lab_ALP <- new('LiverLab', lab_loinc = '6768-6', lab_name = 'Alkaline phosphatase', ylim_min = 0, ylim_max = 1000)
+# liver_lab_total_protein <- new('LiverLab', lab_loinc = '2885-2', lab_name = 'Total protein', ylim_min = 0, ylim_max = 15)
+# liver_lab_serum_albumin <- new('LiverLab', lab_loinc = '1751-7', lab_name = 'Serum albumin', ylim_min = 0, ylim_max = 20)
+# liver_lab_PT <- new('LiverLab', lab_loinc = '5902-2', lab_name = 'Prothrombin time', ylim_min = 0, ylim_max = 50)
+# liver_lab_total_bulirubin <- new('LiverLab', lab_loinc = '1975-2', lab_name = 'Total bilirubin', ylim_min = 0, ylim_max = 15)
+# liver_lab_direct_bulirubin <- new('LiverLab', lab_loinc = '1968-7', lab_name = 'Direct bilirubin', ylim_min = 0, ylim_max = 15)
+# 
+# liver_labs <- c(liver_lab_ALT, 
+#                 liver_lab_GGT, 
+#                 liver_lab_AST, 
+#                 liver_lab_ALP, 
+#                 liver_lab_total_protein, 
+#                 liver_lab_serum_albumin, 
+#                 liver_lab_total_bulirubin, 
+#                 liver_lab_direct_bulirubin)
+# 
+# plots <- map(liver_labs, function(x) plot_lab_raw_values_vs_rel_date(lab_loinc = x@lab_loinc, ylim = c(x@ylim_min, x@ylim_max)))
+# p <- arrangeGrob(sapply(plots, function(x) x[[1]]), ncol = 2)
+
+
+p1 <- plot_lab_raw_values_vs_rel_date(lab_loinc = '6690-2', ylim = c(0, 50)) + ggtitle('Leukocytes')
+
+p2 <- plot_lab_raw_values_vs_rel_date(lab_loinc = '789-8', ylim = c(0, 10)) + ggtitle('RBC')
+
+p3 <- plot_lab_raw_values_vs_rel_date(lab_loinc = '718-7', ylim = c(0, NA)) + ggtitle('Hemoglobin')
+
+p4 <- plot_lab_raw_values_vs_rel_date(lab_loinc = '4544-3', ylim = c(0, NA)) + ggtitle('Hemotocrit')
+
+p5 <- plot_lab_raw_values_vs_rel_date(lab_loinc = '787-2', ylim = c(40, 140)) + ggtitle('MCV')
+
+p6 <- plot_lab_raw_values_vs_rel_date(lab_loinc = '785-6', ylim = c(0, NA)) + ggtitle('MCH')
+
+p7 <- plot_lab_raw_values_vs_rel_date(lab_loinc = '786-4', ylim = c(20, 40)) + ggtitle('MCHC')
+
+p8 <- plot_lab_raw_values_vs_rel_date(lab_loinc = '21000-5', ylim = c(0, NA)) + ggtitle('EDW')
+
+p9 <- plot_lab_raw_values_vs_rel_date(lab_loinc = '788-0', ylim = c(0, NA)) + ggtitle('EDW')
+
+p10 <- plot_lab_raw_values_vs_rel_date(lab_loinc = '777-3', ylim = c(0, 1000)) + ggtitle('Platelets')
+
+p11 <- plot_lab_raw_values_vs_rel_date(lab_loinc = '32207-3', ylim = c(0, NA)) + ggtitle('Platelet dist width')
+
+p12 <- plot_lab_raw_values_vs_rel_date(lab_loinc = '32623-1', ylim = c(0, 20)) + ggtitle('Platelet mean volume')
+
+p <- gridExtra::arrangeGrob(p1, p2, p3, p4, p5, p6, p7, p8, p9, p10, p11, p12, ncol = 4)
+
+ggsave(filename = 'cache/CRC_labs_raw_data_distribution_by_rel_date.png', plot = p, width = 8, height = 6)
+```
+
+![liver function labs](./cache/CRC_labs_raw_data_distribution_by_rel_date.png)
+
+
+Use -180 as the time cutoff and separate the patient journey into two sections: 0 - 180 days before the first diagnosis of abnormal liver function, and 180 days before the first diagnosis of liver abnormal functions. Within each section, we will pick the latest lab measurement for each LOINC lab test (features) and assign either + (within 180 days) or - outcome (outside of 180 days). 
+```{r}
+# prepare data entries for + and - outcomes
+# each lab result is associated with an outcome
+# briefly, the following snippet uses the following algorithm:
+# calculate the relative date to the first abnormal liver function diagnosis: if before diagnosis, - days otherwise + days
+# then cut the relative days into a few windows (-Inf, -365), (-365, -30), (-30, -7), (-7, 0) and (0, Inf)
+# for each window, we only use the closest one to diagnosis date as a representative, although we can use other methods such as the mean
+# at last, only the (-7, 0) window has + outcome, meaning having abnormal liver function; all other windows have normal liver function
+
+df_labs_and_outcomes <- df_labs %>% filter(!(loinc %in% c('21000-5', '32207-3'))) %>%
+  as_tibble() %>%
+  select(-min_diag_date, -rel_date) %>% ## these two columns can be removed from the sql query
+  ##filter(medical_record_number %in% c('2715515', '3087585')) %>% ## test with a few patient
+  left_join(df_cohort, by = 'medical_record_number') %>%
+  mutate(lab_date = ymd(lab_date), min_diag_date = ymd(min_diag_date)) %>%
+  mutate(lab_date_rel_to_diag = as.duration(interval(min_diag_date, lab_date)) / ddays()) %>%
+  mutate(window_num = cut(lab_date_rel_to_diag, c(-Inf, -180, 0, Inf))) %>%
+##select(medical_record_number, loinc, lab_date, min_diag_date, lab_date_rel_to_diag, window_num)
+  filter(window_num %in% c('(-Inf,-180]', '(-180,0]')) %>%
+  arrange(medical_record_number, loinc, -lab_date_rel_to_diag) %>%
+  group_by(medical_record_number, loinc, window_num) %>%
+  mutate(sequence = row_number()) %>%
+  #select(medical_record_number, loinc, lab_date, min_diag_date, lab_date_rel_to_diag, window_num, sequence) %>%
+  ungroup() %>%
+  filter(sequence == 1) %>%
+  mutate(outcome = if_else(window_num == '(-180,0]', 'abnormal', 'normal'))
+
+# the following shows that we have pretty balanced classes for each lab test
+df_labs_and_outcomes %>% group_by(loinc, outcome) %>% summarise(n = n())
+```
+
+Define a list of functions to run statistical comparisons. 
+
+```{r}
+require(caret)
+require(broom)
+require(pROC)
+
+# preprocess: convert the HPO column (and the isnegated column) into three separate features:
+# is_hpoterm_observed_for_H, is_hpoterm_observed_for_L and is_hpoterm_observed_for_N
+# pass in the dataframe of lab tests of one LOINC, return a new dataframe with the three new features
+create_hpo_features <- function(df_one_loinc){
+  df_hpo_features <- df_one_loinc %>%
+    mutate(dummy_value = 1) %>%
+    pivot_wider(names_from = interpretation, names_prefix = 'is_hpoterm_observed_for_', values_from = dummy_value, values_fill = 0) %>%
+    select(lab_result_numeric_value, starts_with('is_hpoterm_observed_for_'), outcome)
+
+  df_hpo_features <- df_hpo_features %>%
+    mutate(outcome = as.factor(outcome)) %>%
+    mutate(outcome = relevel(outcome, 'normal')) %>%
+    mutate(lab_result_numeric_value = as.numeric(lab_result_numeric_value))
+  
+  return (df_hpo_features)
+}
+
+train_test_split <- function(df, p, ...){
+  trainIndex = createDataPartition(df$outcome, p = p, ...)
+  df_train <- df[trainIndex, ]
+  df_test <- df[-trainIndex, ]
+  return (list(df_train=df_train, df_test=df_test))
+}
+
+lr_for_hpo_H <- function(df_train, df_test){
+  model_continuous <- glm(formula = 'outcome ~ lab_result_numeric_value', data = df_train, family = binomial(link = 'logit'))
+  model_hpo <- glm(formula = 'outcome ~ is_hpoterm_observed', data = df_train %>% rename(is_hpoterm_observed = is_hpoterm_observed_for_H), family = binomial(link = 'logit'))
+  prediction_continuous <- predict(model_continuous, df_test, type = 'response')
+  prediction_hpo <- predict(model_hpo, df_test %>% rename(is_hpoterm_observed = is_hpoterm_observed_for_H), type = 'response')
+  roc_continuous <- roc(df_test$outcome, prediction_continuous)
+  roc_hpo <- roc(df_test$outcome, prediction_hpo)
+  return (list(model_continuous, model_hpo, prediction_continuous, prediction_hpo, roc_continuous, roc_hpo))
+}
+
+lr_for_hpo_L <- function(df_train, df_test){
+  model_continuous <- glm(formula = 'outcome ~ lab_result_numeric_value', data = df_train, family = binomial(link = 'logit'))
+  model_hpo <- glm(formula = 'outcome ~ is_hpoterm_observed', data = df_train %>% rename(is_hpoterm_observed = is_hpoterm_observed_for_L), family = binomial(link = 'logit'))
+  prediction_continuous <- predict(model_continuous, df_test, type = 'response')
+  prediction_hpo <- predict(model_hpo, df_test %>% rename(is_hpoterm_observed = is_hpoterm_observed_for_L), type = 'response')
+  roc_continuous <- roc(df_test$outcome, prediction_continuous)
+  roc_hpo <- roc(df_test$outcome, prediction_hpo)
+  return (list(model_continuous, model_hpo, prediction_continuous, prediction_hpo, roc_continuous, roc_hpo))
+}
+
+compare_rocs <- function(roc1, roc2){
+  results <- broom::tidy(roc.test(roc1, roc2, method = "bootstrap"))
+  return (results)
+}
+
+
+pipeline_compare_for_outcome_prediction <- function(df_one_loinc) {
+  
+  df_hpo_features <- create_hpo_features(df_one_loinc = df_one_loinc)
+  df_train_test <- train_test_split(df_hpo_features, p = 0.7, list=FALSE)
+  
+  df_train <- df_train_test$df_train
+  df_test <- df_train_test$df_test
+  
+  # check if we have H for analysis, and/or L
+  valid_lab_outcomes <- df_one_loinc %>% filter(!is.na(hpotermid) & !isnegated) %>% select(interpretation, hpotermid) %>% distinct()
+  
+  roc_comparisons <- list()
+  if ('H' %in% valid_lab_outcomes$interpretation){
+    lr_H <- lr_for_hpo_H(df_train = df_train, df_test = df_test)
+    roc_comparison <- compare_rocs(lr_H[[5]], lr_H[[6]])
+    roc_comparison <- bind_cols(roc_comparison, valid_lab_outcomes %>% filter(interpretation == 'H'))
+    roc_comparisons$H <- roc_comparison
+  }
+  
+  if ('L' %in% valid_lab_outcomes$interpretation){
+    lr_L <- lr_for_hpo_L(df_train = df_train, df_test = df_test)
+    roc_comparison <- compare_rocs(lr_L[[5]], lr_L[[6]])
+    roc_comparison <- bind_cols(roc_comparison, valid_lab_outcomes %>% filter(interpretation == 'L'))
+    roc_comparisons$L <- roc_comparison
+  }
+  
+  roc_comparisons_combined <- bind_rows(roc_comparisons)
+  
+  roc_comparisons_combined
+}
+
+example_loinc = '787-2'
+df_one_loinc <- df_labs_and_outcomes %>% filter(loinc == example_loinc)
+pipeline_compare_for_outcome_prediction(df_one_loinc = df_one_loinc)
+```
+
+
+```{r max.output=-1, message=FALSE}
+require(furrr)
+plan(multisession, workers = 4)
+
+crc_analysis <- df_labs_and_outcomes %>%
+  group_by(loinc) %>%
+  nest() %>%
+  mutate(result = future_map(data, pipeline_compare_for_outcome_prediction)) %>%
+  select(-data) %>%
+  unnest(result)
+
+crc_analysis
+```
+
+```{r message=FALSE}
+df_one_loinc <- df_labs_and_outcomes %>% filter(loinc == '4544-3')
+
+df_hpo_features <- create_hpo_features(df_one_loinc = df_one_loinc)
+
+df_train_test <- train_test_split(df_hpo_features, p = 0.7, list=FALSE)
+  
+df_train <- df_train_test$df_train
+df_test <- df_train_test$df_test
+  
+  
+lr_L <- lr_for_hpo_L(df_train = df_train, df_test = df_test)
+roc_comparison <- compare_rocs(lr_L[[5]], lr_L[[6]])
+roc_comparison <- bind_cols(roc_comparison)
+
+plot(lr_L[[5]])
+plot(lr_L[[6]])
+
+roc.test(lr_L[[5]], lr_L[[6]], method = "bootstrap")
+```
+
+
+
+## Use separate cohort for control
+
+The above section used the same CRC cohort as their controls (patients were assumed CRC free one year before their diagnoses). In this section, we will define a separate cohort as controls. The control cohort are entirely free from any cancer diagnosis. We will start from a random sample of cancer-free patients. 
+
+Retrieve the demographic table for cases, and then for controls. 
+Retrieve the lab table for cases, and then for controls. 
+Select the labs within 180 days of diagnosis for analysis;
+Select the latest labs for the control patients for analysis. 
+
+```{r}
+sql <- read_file('../sql/colorectal_cancer_cohort_demographics.sql')
+df_case_demographics <- get_df_from_db_or_cache(cache_dir = CACHE_DIR, file_name = 'demographics_colorectal_cancer_cases.csv', db_access_callback = dbGetQuery, conn = dsca, statement = sql, force_rerun = FALSE)
+
+sql <- read_file('../sql/colorectal_cancer_control_cohort.sql')
+n<- dbExecute(dsca, sql)
+
+sql <- 'SELECT * FROM control_cohort'
+df_control_demographics <- get_df_from_db_or_cache(cache_dir = CACHE_DIR, file_name = 'demographics_colorectal_cancer_controls.csv', db_access_callback = dbGetQuery, conn = dsca, statement = sql, force_rerun = FALSE)
+
+sql <- read_file('../sql/get_labs_for_colorectal_cancer_control.sql')
+df_control_labs <- get_df_from_db_or_cache(cache_dir = CACHE_DIR, file_name = 'labs_colorectal_cancer_sampled_controls.csv', db_access_callback = dbGetQuery, conn = dsca, statement = sql, force_rerun = TRUE)
+```
+
+```{r}
+# labs for cases
+df_labs_and_outcomes_cases <- df_labs %>% filter(!(loinc %in% c('21000-5', '32207-3'))) %>%
+  as_tibble() %>%
+  select(-min_diag_date, -rel_date) %>% ## these two columns can be removed from the sql query
+  #filter(medical_record_number %in% c('1006680', '3087585')) %>% ## test with a few patient
+  left_join(df_cohort, by = 'medical_record_number') %>%
+  mutate(lab_date = ymd(lab_date), min_diag_date = ymd(min_diag_date)) %>%
+  mutate(lab_date_rel_to_diag = as.duration(interval(min_diag_date, lab_date)) / ddays()) %>%
+  filter(lab_date_rel_to_diag >= -180 & lab_date_rel_to_diag <= 0) %>%
+  arrange(medical_record_number, loinc, -lab_date_rel_to_diag) %>%
+  group_by(medical_record_number, loinc) %>%
+  mutate(sequence = row_number()) %>%
+  ungroup() %>%
+  filter(sequence == 1) %>%
+  mutate(outcome = 'abnormal')
+
+# labs for controls
+df_labs_and_outcomes_controls <- df_control_labs %>% filter(!(loinc %in% c('21000-5', '32207-3'))) %>%
+  as_tibble() %>%
+  #filter(medical_record_number == '7007952')  %>%
+  #mutate(lab_date = as.Date(lab_date)) %>%
+  arrange(medical_record_number, loinc, desc(lab_date)) %>%
+  group_by(medical_record_number, loinc) %>%
+  mutate(sequence = row_number()) %>%
+  ungroup() %>%
+  filter(sequence == 1) %>%
+  mutate(outcome = 'normal')
+
+nrow(df_labs_and_outcomes_cases)
+nrow(df_labs_and_outcomes_controls)
+
+df_labs_and_outcomes_case_control <- bind_rows(
+  df_labs_and_outcomes_cases %>% select(medical_record_number, lab_date, loinc, local_test_code, lab_result_numeric_value, unit_of_measure, normal_range, interpretation, hpotermid, isnegated, outcome),
+  df_labs_and_outcomes_controls %>% select(medical_record_number, lab_date, loinc, local_test_code, lab_result_numeric_value, unit_of_measure, normal_range, interpretation, hpotermid, isnegated, outcome)
+)
+
+rm(df_labs_and_outcomes_cases, df_labs_and_outcomes_controls)
+
+df_labs_and_outcomes_case_control %>% sample_n(10)
+```
+```{r max.output=-1, message=FALSE}
+require(furrr)
+plan(multisession, workers = 4)
+
+crc_separate_controls_analysis <- df_labs_and_outcomes_case_control %>%
+  group_by(loinc) %>%
+  nest() %>%
+  mutate(result = future_map(data, pipeline_compare_for_outcome_prediction)) %>%
+  select(-data) %>%
+  unnest(result)
+
+crc_separate_controls_analysis
+```
+
+```{r message=FALSE}
+df_one_loinc <- df_labs_and_outcomes_case_control %>% filter(loinc == '4544-3')
+
+df_hpo_features <- create_hpo_features(df_one_loinc = df_one_loinc)
+
+df_train_test <- train_test_split(df_hpo_features, p = 0.7, list=FALSE)
+  
+df_train <- df_train_test$df_train
+df_test <- df_train_test$df_test
+  
+  
+lr_L <- lr_for_hpo_L(df_train = df_train, df_test = df_test)
+roc_comparison <- compare_rocs(lr_L[[5]], lr_L[[6]])
+roc_comparison <- bind_cols(roc_comparison)
+
+plot(lr_L[[5]])
+plot(lr_L[[6]])
+
+roc.test(lr_L[[5]], lr_L[[6]], method = "bootstrap")
+```
