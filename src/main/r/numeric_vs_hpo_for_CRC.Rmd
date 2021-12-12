@@ -323,7 +323,7 @@ sql <- 'SELECT * FROM control_cohort'
 df_control_demographics <- get_df_from_db_or_cache(cache_dir = CACHE_DIR, file_name = 'demographics_colorectal_cancer_controls.csv', db_access_callback = dbGetQuery, conn = dsca, statement = sql, force_rerun = FALSE)
 
 sql <- read_file('../sql/get_labs_for_colorectal_cancer_control.sql')
-df_control_labs <- get_df_from_db_or_cache(cache_dir = CACHE_DIR, file_name = 'labs_colorectal_cancer_sampled_controls.csv', db_access_callback = dbGetQuery, conn = dsca, statement = sql, force_rerun = TRUE)
+df_control_labs <- get_df_from_db_or_cache(cache_dir = CACHE_DIR, file_name = 'labs_colorectal_cancer_sampled_controls.csv', db_access_callback = dbGetQuery, conn = dsca, statement = sql, force_rerun = FALSE)
 ```
 
 ```{r}
@@ -367,16 +367,24 @@ rm(df_labs_and_outcomes_cases, df_labs_and_outcomes_controls)
 
 df_labs_and_outcomes_case_control %>% sample_n(10)
 ```
+
+
 ```{r max.output=-1, message=FALSE}
 require(furrr)
-plan(multisession, workers = 4)
+plan(multisession, workers=8)
+start_time <- Sys.time()
 
 crc_separate_controls_analysis <- df_labs_and_outcomes_case_control %>%
   group_by(loinc) %>%
   nest() %>%
-  mutate(result = future_map(data, pipeline_compare_for_outcome_prediction)) %>%
+  ungroup() %>%
+  mutate(result = future_map(data, pipeline_compare_for_outcome_prediction, .options = furrr_options(seed = T))) %>%
   select(-data) %>%
   unnest(result)
+
+end_time <- Sys.time()
+
+print(end_time - start_time)
 
 crc_separate_controls_analysis
 ```
@@ -400,4 +408,160 @@ plot(lr_L[[5]])
 plot(lr_L[[6]])
 
 roc.test(lr_L[[5]], lr_L[[6]], method = "bootstrap")
+```
+
+
+# Age and race matching
+The above analysis just sampled the control cohort randomly. In this section, we will determine whether we need to match sex, age and race. 
+
+```{r}
+## because of our processing, cases without desired labs are not counted here
+df_labs_and_outcomes_case_control %>% select(medical_record_number, outcome) %>%
+  distinct() %>%
+  left_join(bind_rows(df_case_demographics, df_control_demographics), by = 'medical_record_number') %>%
+  group_by(outcome, race) %>%
+  summarise(n = n())
+
+df_demographics_with_outcomes <- bind_rows(df_case_demographics %>% select(-min_diag_date) %>% mutate(outcome = 'abnormal'),
+          df_control_demographics %>% mutate(outcome = 'normal')) %>% mutate(age = as.duration(interval(date_of_birth, today())) / dyears())
+
+df_demographics_with_outcomes <- df_demographics_with_outcomes %>%
+  filter(gender %in% c('Male', 'Female')) %>%
+  filter_all(all_vars(!is.na(.))) %>% 
+  mutate(outcome = as.factor(outcome), 
+         gender = as.factor(gender),
+         race = as.factor(race)) %>% 
+  mutate(outcome = relevel(outcome, 'normal'),
+         gender = relevel(gender, 'Male'),
+         race = relevel(race, 'White')) 
+
+## determine if gender and race are associated with outcome: CRC or no CRC
+ncase <- nrow(df_demographics_with_outcomes[df_demographics_with_outcomes$outcome == 'abnormal',])
+model <- glm(formula = outcome ~ gender + race + age, data = df_demographics_with_outcomes %>% filter(outcome == 'abnormal') %>% union_all(df_demographics_with_outcomes %>% filter(outcome == 'normal') %>% sample_n(ncase)),
+                    family = binomial)
+
+anova(model, test = 'Chisq')
+```
+```{r}
+prediction <- predict(model, newdata = df_demographics_with_outcomes , type = 'response', na.action = na.pass)
+
+df_demographics_with_outcomes$propensity_score <- prediction
+
+ggplot(df_demographics_with_outcomes, aes(x = outcome, y = propensity_score)) +
+  geom_violin()
+```
+```{r}
+require(MatchIt)
+
+# it is really slow. have to kill it before finishing
+# match_outcome <- matchit(outcome ~ gender + race + age, method = "nearest", data = df_demographics_with_outcomes %>% select(-propensity_score))
+
+# try this stackoverflow method
+# https://stackoverflow.com/questions/29672088/speedup-matchit
+# still slow, but works
+df_demographics_with_outcomes %>% colnames()
+m.out <- matchit(outcome ~ medical_record_number, data = df_demographics_with_outcomes, method = "nearest", distance = df_demographics_with_outcomes$propensity_score)
+save(m.out, file='m.out.obj')
+matched_unique_ids_etc <- match.data(m.out, data = df_demographics_with_outcomes)
+
+matched_unique_ids_etc %>% group_by(outcome) %>% summarise(n =n())
+ggplot(matched_unique_ids_etc, aes(x = outcome, y = propensity_score)) +
+  geom_violin()
+
+ggplot(matched_unique_ids_etc, aes(x = outcome, y = age)) +
+  geom_violin()
+```
+We need to put back the identifiers of controls to the database in order to selectively retrieve their labs. 
+```{r}
+dbExecute(dsca, "create table if not exists matched_control_cohort (medical_record_number VARCHAR)")
+dbExecute(dsca, "truncate table matched_control_cohort")
+
+
+insert_mrns <- function(mrns_str, dbconn = dsca){
+  sql <- glue('insert into matched_control_cohort values {mrns_str};')
+  message(sql)
+  dbExecute(dbconn, sql)
+}
+
+matched_unique_ids_etc %>% filter(outcome == 'normal') %>% 
+  rowwise() %>%
+  mutate(batch_number = sample(seq(10), size = 1, replace = TRUE)) %>%
+  ungroup() %>%
+  group_by(batch_number) %>%
+  summarise(sql_query = str_c(str_c("('", medical_record_number, "')"), collapse = ",")) %>% 
+  ungroup() %>%
+  mutate(sql_query = walk(sql_query, insert_mrns, dbconn = dsca))
+
+# retrieve labs for the matched control cohort
+sql <- read_file('../sql/get_labs_for_colorectal_cancer_matched_control.sql')
+df_matched_control_labs <- get_df_from_db_or_cache(cache_dir = CACHE_DIR, file_name = 'labs_colorectal_cancer_matched_controls.csv', db_access_callback = dbGetQuery, conn = dsca, statement = sql, force_rerun = TRUE)
+
+# drop the matched control cohort
+# persist it for a while for now
+# n <- dbExecute(dsca, "DROP TABLE IF EXISTS matched_control_cohort")
+# assertthat::are_equal(n, 0)
+```
+
+Rerun the analysis with the matched controls. 
+
+```{r}
+# labs for cases
+df_labs_and_outcomes_cases <- df_labs %>% filter(!(loinc %in% c('21000-5', '32207-3'))) %>%
+  as_tibble() %>%
+  select(-min_diag_date, -rel_date) %>% ## these two columns can be removed from the sql query
+  #filter(medical_record_number %in% c('1006680', '3087585')) %>% ## test with a few patient
+  left_join(df_cohort, by = 'medical_record_number') %>%
+  mutate(lab_date = ymd(lab_date), min_diag_date = ymd(min_diag_date)) %>%
+  mutate(lab_date_rel_to_diag = as.duration(interval(min_diag_date, lab_date)) / ddays()) %>%
+  filter(lab_date_rel_to_diag >= -180 & lab_date_rel_to_diag <= 0) %>%
+  arrange(medical_record_number, loinc, -lab_date_rel_to_diag) %>%
+  group_by(medical_record_number, loinc) %>%
+  mutate(sequence = row_number()) %>%
+  ungroup() %>%
+  filter(sequence == 1) %>%
+  mutate(outcome = 'abnormal')
+
+# labs for controls
+df_labs_and_outcomes_matched_controls <- df_matched_control_labs %>% filter(!(loinc %in% c('21000-5', '32207-3'))) %>%
+  as_tibble() %>%
+  #filter(medical_record_number == '7007952')  %>%
+  #mutate(lab_date = as.Date(lab_date)) %>%
+  arrange(medical_record_number, loinc, desc(lab_date)) %>%
+  group_by(medical_record_number, loinc) %>%
+  mutate(sequence = row_number()) %>%
+  ungroup() %>%
+  filter(sequence == 1) %>%
+  mutate(outcome = 'normal')
+
+nrow(df_labs_and_outcomes_cases)
+nrow(df_labs_and_outcomes_matched_controls)
+
+df_labs_and_outcomes_case_matched_control <- bind_rows(
+  df_labs_and_outcomes_cases %>% select(medical_record_number, lab_date, loinc, local_test_code, lab_result_numeric_value, unit_of_measure, normal_range, interpretation, hpotermid, isnegated, outcome),
+  df_labs_and_outcomes_matched_controls %>% select(medical_record_number, lab_date, loinc, local_test_code, lab_result_numeric_value, unit_of_measure, normal_range, interpretation, hpotermid, isnegated, outcome)
+)
+
+rm(df_labs_and_outcomes_cases, df_labs_and_outcomes_matched_controls)
+
+df_labs_and_outcomes_case_matched_control %>% sample_n(10)
+```
+
+```{r max.output=-1, message=FALSE}
+require(furrr)
+plan(multisession, workers=4)
+start_time <- Sys.time()
+
+crc_case_matched_controls_analysis <- df_labs_and_outcomes_case_matched_control %>%
+  group_by(loinc) %>%
+  nest() %>%
+  ungroup() %>%
+  mutate(result = future_map(data, pipeline_compare_for_outcome_prediction, .options = furrr_options(seed = T))) %>%
+  select(-data) %>%
+  unnest(result)
+
+end_time <- Sys.time()
+
+print(end_time - start_time)
+
+crc_case_matched_controls_analysis
 ```
