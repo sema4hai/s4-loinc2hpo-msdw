@@ -186,7 +186,7 @@ create_hpo_features <- function(df_one_loinc){
   df_hpo_features <- df_one_loinc %>%
     mutate(dummy_value = 1) %>%
     pivot_wider(names_from = interpretation, names_prefix = 'is_hpoterm_observed_for_', values_from = dummy_value, values_fill = 0) %>%
-    select(lab_result_numeric_value, starts_with('is_hpoterm_observed_for_'), outcome)
+    select(lab_result_numeric_value, starts_with('is_hpoterm_observed_for_'), any_of(c('age', 'gender', 'race')), outcome)
 
   df_hpo_features <- df_hpo_features %>%
     mutate(outcome = as.factor(outcome)) %>%
@@ -203,9 +203,16 @@ train_test_split <- function(df, p, ...){
   return (list(df_train=df_train, df_test=df_test))
 }
 
-lr_for_hpo_H <- function(df_train, df_test){
-  model_continuous <- glm(formula = 'outcome ~ lab_result_numeric_value', data = df_train, family = binomial(link = 'logit'))
-  model_hpo <- glm(formula = 'outcome ~ is_hpoterm_observed', data = df_train %>% rename(is_hpoterm_observed = is_hpoterm_observed_for_H), family = binomial(link = 'logit'))
+lr_for_hpo_H <- function(df_train, df_test, include_demographics=FALSE){
+  if (include_demographics){
+    formula_continuous = 'outcome ~ lab_result_numeric_value + age + gender + race'
+    formula_hpo = 'outcome ~ is_hpoterm_observed + age + gender + race'
+  } else {
+    formula_continuous = 'outcome ~ lab_result_numeric_value'
+    formula_hpo = 'outcome ~ is_hpoterm_observed'
+  }
+  model_continuous <- glm(formula = formula_continuous, data = df_train, family = binomial(link = 'logit'))
+  model_hpo <- glm(formula = formula_hpo, data = df_train %>% rename(is_hpoterm_observed = is_hpoterm_observed_for_H), family = binomial(link = 'logit'))
   prediction_continuous <- predict(model_continuous, df_test, type = 'response')
   prediction_hpo <- predict(model_hpo, df_test %>% rename(is_hpoterm_observed = is_hpoterm_observed_for_H), type = 'response')
   roc_continuous <- roc(df_test$outcome, prediction_continuous)
@@ -213,9 +220,17 @@ lr_for_hpo_H <- function(df_train, df_test){
   return (list(model_continuous, model_hpo, prediction_continuous, prediction_hpo, roc_continuous, roc_hpo))
 }
 
-lr_for_hpo_L <- function(df_train, df_test){
-  model_continuous <- glm(formula = 'outcome ~ lab_result_numeric_value', data = df_train, family = binomial(link = 'logit'))
-  model_hpo <- glm(formula = 'outcome ~ is_hpoterm_observed', data = df_train %>% rename(is_hpoterm_observed = is_hpoterm_observed_for_L), family = binomial(link = 'logit'))
+lr_for_hpo_L <- function(df_train, df_test, include_demographics=FALSE){
+  if (include_demographics){
+    formula_continuous = 'outcome ~ lab_result_numeric_value + age + gender + race'
+    formula_hpo = 'outcome ~ is_hpoterm_observed + age + gender + race'
+  } else {
+    formula_continuous = 'outcome ~ lab_result_numeric_value'
+    formula_hpo = 'outcome ~ is_hpoterm_observed'
+  }
+
+  model_continuous <- glm(formula = formula_continuous, data = df_train, family = binomial(link = 'logit'))
+  model_hpo <- glm(formula = formula_hpo, data = df_train %>% rename(is_hpoterm_observed = is_hpoterm_observed_for_L), family = binomial(link = 'logit'))
   prediction_continuous <- predict(model_continuous, df_test, type = 'response')
   prediction_hpo <- predict(model_hpo, df_test %>% rename(is_hpoterm_observed = is_hpoterm_observed_for_L), type = 'response')
   roc_continuous <- roc(df_test$outcome, prediction_continuous)
@@ -229,7 +244,7 @@ compare_rocs <- function(roc1, roc2){
 }
 
 
-pipeline_compare_for_outcome_prediction <- function(df_one_loinc) {
+pipeline_compare_for_outcome_prediction <- function(df_one_loinc, include_demographics=FALSE) {
   
   df_hpo_features <- create_hpo_features(df_one_loinc = df_one_loinc)
   df_train_test <- train_test_split(df_hpo_features, p = 0.7, list=FALSE)
@@ -242,14 +257,14 @@ pipeline_compare_for_outcome_prediction <- function(df_one_loinc) {
   
   roc_comparisons <- list()
   if ('H' %in% valid_lab_outcomes$interpretation){
-    lr_H <- lr_for_hpo_H(df_train = df_train, df_test = df_test)
+    lr_H <- lr_for_hpo_H(df_train = df_train, df_test = df_test, include_demographics=include_demographics)
     roc_comparison <- compare_rocs(lr_H[[5]], lr_H[[6]])
     roc_comparison <- bind_cols(roc_comparison, valid_lab_outcomes %>% filter(interpretation == 'H'))
     roc_comparisons$H <- roc_comparison
   }
   
   if ('L' %in% valid_lab_outcomes$interpretation){
-    lr_L <- lr_for_hpo_L(df_train = df_train, df_test = df_test)
+    lr_L <- lr_for_hpo_L(df_train = df_train, df_test = df_test, include_demographics=include_demographics)
     roc_comparison <- compare_rocs(lr_L[[5]], lr_L[[6]])
     roc_comparison <- bind_cols(roc_comparison, valid_lab_outcomes %>% filter(interpretation == 'L'))
     roc_comparisons$L <- roc_comparison
@@ -468,8 +483,18 @@ matched_unique_ids_etc %>% group_by(outcome) %>% summarise(n =n())
 ggplot(matched_unique_ids_etc, aes(x = outcome, y = propensity_score)) +
   geom_violin()
 
-ggplot(matched_unique_ids_etc, aes(x = outcome, y = age)) +
-  geom_violin()
+plot_match_age <- ggplot(matched_unique_ids_etc, aes(x = outcome, y = age, fill = outcome)) +
+  geom_violin(draw_quantiles = c(0.5)) +
+  theme(legend.position = 'none')
+
+plot_match_gender <- ggplot(matched_unique_ids_etc, aes(x = outcome, fill = gender)) +
+  geom_bar(stat = 'count')
+
+plot_match_race <- ggplot(matched_unique_ids_etc, aes(x = outcome, fill = race)) +
+  geom_bar(stat = 'count')
+
+plot_match <- gridExtra::arrangeGrob(plot_match_age, plot_match_gender, plot_match_race, layout_matrix = rbind(c(1,2), c(3,3)), ncol = 1)
+plot(plot_match)
 ```
 We need to put back the identifiers of controls to the database in order to selectively retrieve their labs. 
 ```{r}
@@ -523,6 +548,9 @@ df_labs_and_outcomes_cases <- df_labs %>% filter(!(loinc %in% c('21000-5', '3220
 
 # labs for controls
 df_labs_and_outcomes_matched_controls <- df_matched_control_labs %>% filter(!(loinc %in% c('21000-5', '32207-3'))) %>%
+  # my current control still contains CRC patients
+  # TODO: further purify controls
+  filter(!(medical_record_number %in% df_labs_and_outcomes_cases$medical_record_number)) %>%
   as_tibble() %>%
   #filter(medical_record_number == '7007952')  %>%
   #mutate(lab_date = as.Date(lab_date)) %>%
@@ -565,3 +593,36 @@ print(end_time - start_time)
 
 crc_case_matched_controls_analysis
 ```
+
+Combine demographics to see whether the AUC can be improved. 
+```{r}
+df_demographics_case_matched_control <- bind_rows(df_case_demographics %>% select(-min_diag_date), 
+                                                  df_control_demographics %>% filter(medical_record_number %in% 
+                                                                                       unique(df_matched_control_labs$medical_record_number)) %>%
+                                                    filter(!(medical_record_number %in% df_case_demographics$medical_record_number)))
+
+
+plan(multisession, workers=4)
+start_time <- Sys.time()
+
+crc_case_matched_controls_analysis_with_demographics <- df_labs_and_outcomes_case_matched_control %>%
+  left_join(df_demographics_case_matched_control, by = 'medical_record_number') %>%
+  mutate(age = as.duration(interval(date_of_birth, lab_date)) / dyears()) %>%
+  filter(!(race %in% c('African American', 'American Indian or Alaska Native', 'Native Hawaiian or Other Pacific Islander'))) %>%
+  # mutate(gender = as.factor(gender),
+  #        race = as.factor(race)) %>% 
+  # mutate(gender = relevel(gender, 'Male'),
+  #        race = relevel(race, 'White')) %>%
+  group_by(loinc) %>%
+  nest() %>%
+  mutate(result = future_map(data, pipeline_compare_for_outcome_prediction, include_demographics=TRUE, .options = furrr_options(seed = T))) %>%
+  select(-data) %>%
+  unnest(result)
+
+end_time <- Sys.time()
+
+print(end_time - start_time)
+
+crc_case_matched_controls_analysis_with_demographics
+```
+
