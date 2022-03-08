@@ -40,6 +40,211 @@ get_db_data <- function(sql, df_path, force_rerun=FALSE, cache_dir=CACHE_DIR){
 }
 ```
 
+### Collect patient basic demographics
+```{r}
+get_patient_race_sex_distribution <- function(force_rerun=FALSE, cache_dir=CACHE_DIR){
+  df_path = glue('{cache_dir}/patient_count_by_race_sex.csv')
+  
+  if (force_rerun | !file.exists(df_path)){
+    df <- dbGetQuery(dsca, "
+            select race, gender, count(*) as n
+            from hai_az_prod.person_msdw_2020july pmj 
+            group by race, gender 
+            order by race, gender;
+            ")
+    
+    write.csv(df, file = df_path, row.names=FALSE)
+  }
+  
+  df <- read.csv(df_path)
+  
+  return (df)
+  
+}
+
+patient_race_sex_distribution <- get_patient_race_sex_distribution()
+
+# recode all unknown gender as one category
+patient_race_sex_distribution <- patient_race_sex_distribution %>% 
+  mutate(gender = recode(gender, 'MSDW_NOT APPL' = 'Unknown')) %>%
+  mutate(gender = recode(gender, 'MSDW_OTHER' = 'Unknown')) %>%
+  mutate(gender = recode(gender, 'MSDW_UNKNOWN' = 'Unknown')) %>%
+  mutate(gender = recode(gender, 'NOT AVAILABLE'= 'Unknown')) %>%
+  mutate(gender = recode(gender, .missing = 'Unknown'))
+
+# recode "African American" as "Black or African American"
+# TODO: update the race map
+patient_race_sex_distribution <- patient_race_sex_distribution %>%
+  mutate(race = recode(race, 'African American' = 'Black or African American'))
+```
+
+```{r}
+countByGender <- patient_race_sex_distribution %>% 
+  group_by(gender) %>% 
+  summarise(n = sum(n))
+
+plot_by_sex <- ggplot(countByGender) + 
+  geom_bar(aes(x = 1, y = n / sum(n), fill = gender), stat = "identity") + 
+  scale_fill_manual(name = "Sex", values = c(Male = "royalblue", Female = "lightcoral", Indeterminant = 'Cyan', Unknown = 'Orange')) + 
+  xlab("") + ylab("patient count") +
+  coord_polar(theta = "y") + 
+  theme_bw() + 
+  theme(panel.grid = element_blank(), legend.position = c(0.25, 0.7), 
+        axis.text = element_blank(), axis.ticks = element_blank(), 
+        axis.title = element_text(size = 8), legend.text = element_text(size = 8), 
+        legend.title = element_text(size = 10), 
+        legend.background = element_rect(fill=alpha('white', 0.1)))
+
+ggsave(filename = glue('{CACHE_DIR}/plot_by_sex.png'), plot = plot_by_sex, width = 2.5, height = 2.5)
+plot_by_sex
+
+```
+
+
+```{r}
+countByRace_Gender <- patient_race_sex_distribution
+
+countByRace_Gender$race <- if_else(countByRace_Gender$race == 'Unknown', 'Unreported', countByRace_Gender$race)
+
+plot_by_race  <- ggplot(countByRace_Gender %>% 
+         filter(gender %in% c('Male', 'Female')) %>% 
+         mutate(race = as.factor(race), n = if_else(gender == "Male", n, -n))) + 
+  geom_bar(aes(x = reorder(race, -n, FUN=sum), y = n, fill = gender, group=gender), stat="identity") + 
+##  scale_y_continuous(breaks = seq(-40,40, 10), labels = abs(seq(-40,40, 10))) +
+  scale_fill_manual(name = "Sex", values = c(Male = "royalblue", Female = "lightcoral")) + 
+  scale_y_continuous(labels = abs) +
+  xlab("") + ylab("patient count") +
+  coord_flip() + 
+  theme_bw() + 
+  theme(panel.grid = element_blank(), legend.position = "right", 
+        axis.title = element_text(size = 8), axis.text = element_text(size = 8), 
+        legend.text = element_text(size = 8), legend.title = element_text(size = 10), 
+        legend.background = element_rect(fill=alpha('white', 0.1)))
+
+ggsave(filename = glue("{CACHE_DIR}/plotByRace.png"), plot = plot_by_race, width = 5, height = 2)
+plot_by_race
+```
+
+Patient age analysis: find the birth years for all the patients and find their current age
+```{r}
+get_patient_birth_year_distribution <- function(force_rerun=FALSE, cache_dir=CACHE_DIR){
+  df_path = glue('{cache_dir}/patient_count_by_birth_year_sex.csv')
+  
+  if (force_rerun | !file.exists(df_path)){
+    df <- dbGetQuery(dsca, "
+            with person_birth_year as (
+            	select medical_record_number , date_of_birth , gender , date_part('Year', date_of_birth) as birth_year 
+            	from hai_az_prod.person_msdw_2020july pmj
+            )
+            select birth_year, gender, count(*) as n 
+            from person_birth_year 
+            group by birth_year , gender 
+            order by birth_year, gender;
+            ")
+    
+    write.csv(df, file = df_path, row.names=FALSE)
+  }
+  
+  df <- read.csv(df_path)
+  
+  return (df)
+  
+}
+
+patient_birth_year_sex_distribution <- get_patient_birth_year_distribution()
+
+# lump together sex that can be treated as Unknown
+patient_birth_year_sex_distribution <- patient_birth_year_sex_distribution %>% 
+  mutate(gender = recode(gender, 'MSDW_NOT APPL' = 'Unknown')) %>%
+  mutate(gender = recode(gender, 'MSDW_OTHER' = 'Unknown')) %>%
+  mutate(gender = recode(gender, 'MSDW_UNKNOWN' = 'Unknown')) %>%
+  mutate(gender = recode(gender, 'NOT AVAILABLE'= 'Unknown')) %>%
+  mutate(gender = recode(gender, .missing = 'Unknown')) %>%
+  # sample_n(50) %>%
+  # ignore ~ 1 million patients whoes birth_year is unknown
+  # filter(!is.na(birth_year)) %>%
+  # 2 patients have birth_year after 2020, which is clearly error as our database cut off is 2020
+  filter(birth_year <= 2020) %>%
+  mutate(birth_year_bucket = cut(birth_year, breaks = c(1800, seq(1931, 2021, by = 10)), dig.lab = 4)) %>%
+  group_by(birth_year_bucket, gender) %>% 
+  summarise(n = sum(n)) %>% 
+  arrange(birth_year_bucket)
+
+
+plot_by_birth_year_sex <- patient_birth_year_sex_distribution %>% ungroup() %>% 
+  filter(gender %in% c('Male', 'Female')) %>% 
+  mutate(n = if_else(gender == 'Female', -n, n)) %>%
+  mutate(birth_year_bucket = factor(birth_year_bucket, levels = rev(levels(birth_year_bucket)))) %>% 
+  # change bucket name (1800,1931] to '<= 1931'
+  # change bucket name (2011, 2021] to '(2011, 2020]' -- our database cutoff is 2020
+  mutate(birth_year_bucket = recode(birth_year_bucket, '(1800,1931]' = '<=1931')) %>% 
+  mutate(birth_year_bucket = recode(birth_year_bucket, '(2011,2021]' = '(2011,2020]')) %>%{
+    ggplot(.) +
+  geom_bar(aes(x = birth_year_bucket, y = n, fill = gender), stat = 'identity') + 
+  scale_fill_manual(name = "Sex", values = c(Male = "royalblue", Female = "lightcoral")) + 
+  scale_y_continuous(labels = abs) +
+  xlab('') + ylab('patient count') +
+  coord_flip() + 
+      theme_bw() + 
+  theme(panel.grid = element_blank(), legend.position = "right", 
+        axis.title = element_text(size = 8), axis.text = element_text(size = 8), 
+        legend.text = element_text(size = 8), legend.title = element_text(size = 10), 
+        legend.background = element_rect(fill=alpha('white', 0.1)))
+  }
+  
+
+ggsave(filename = glue("{CACHE_DIR}/plotByBirthyearSex.png"), plot = plot_by_birth_year_sex, width = 4, height = 3)
+plot_by_birth_year_sex
+  
+```
+
+
+### Count patient distribution by the number of HPO terms per patient 
+```{r}
+
+```
+
+
+### Collect patient counts for those with lab data at each year
+
+```{r}
+get_tested_patient_count_by_year <- function(force_rerun=FALSE, cache_dir=CACHE_DIR){
+  df_path = glue('{cache_dir}/tested_patient_count_by_year.csv')
+  
+  if (force_rerun | !file.exists(df_path)){
+    df <- dbGetQuery(dsca, "
+            with scc_lab as (
+            	select medical_record_number , calendar_date as lab_date, date_part('Year', lab_date) as lab_year
+            	from hai_az_prod.lab_scc_2020july lsj
+            ), 
+            epic_lab as (
+            	select mrn as medical_record_number, order_date as lab_date, date_part('Year', lab_date) as lab_year
+            	from hai_az_test.lab_epic_2020july lej
+            ),
+            scc_and_epic as (
+            	select * 
+            	from scc_lab 
+            	union all
+            	select * 
+            	from epic_lab
+            )
+            select lab_year, count(distinct medical_record_number) as n_patient
+            from scc_and_epic 
+            group by lab_year
+            order by lab_year;
+            ")
+    
+    write.csv(df, file = df_path, row.names=FALSE)
+  }
+  
+  df <- read.csv(df_path)
+  
+  return (df)
+}
+
+tested_patient_count_by_year <- get_tested_patient_count_by_year()
+```
+
 
 ### Analyze changes of observed phenotypes
 We will used the persisted lab test table for this analysis. 
@@ -76,21 +281,30 @@ phenotype_rank_all_by_year <- get_phenotype_rank_all_by_year()
 
 
 ```{r}
-plot_phenotypes_of_interest_by_year <- function(terms_of_interest, df){
+plot_phenotypes_of_interest_by_year <- function(terms_of_interest, df, normalize=TRUE){
   hpo_terms_selected <- df %>% filter(termid %in% terms_of_interest) %>% select(termid, label) %>% distinct()
+  
+  y_str = ifelse(normalize, 'n_patient/n_tested', 'n_patient')
+  y_label = ifelse(normalize, 'patient fraction among tested', 'patient count')
 
   p <- df %>% filter(termid %in% terms_of_interest) %>% 
     filter(lab_year <= 2019 & lab_year > 2000) %>%
-    ggplot(aes(x = lab_year, y = n_patient, group = termid, color = termid)) + 
+    ggplot(aes(x = lab_year, y = eval(parse(text=y_str)), group = termid, color = termid)) + 
     geom_point() +
     geom_line() +
-    scale_color_discrete(breaks = hpo_terms_selected$termid, labels = str_c(hpo_terms_selected$termid, hpo_terms_selected$label, sep = " "))
+    scale_color_discrete(breaks = hpo_terms_selected$termid, labels = str_c(hpo_terms_selected$termid, hpo_terms_selected$label, sep = " ")) +
+    ylab(y_label)
   
   return (p)
 }
 
 hpo_level_1_terms <- phenotype_rank_all_by_year %>% filter(distancetoroot == 1) %>% select(termid, label) %>% distinct()
-plot_phenotypes_of_interest_by_year(terms_of_interest = hpo_level_1_terms$termid, df=phenotype_rank_all_by_year)
+plot_phenotypes_of_interest_by_year(terms_of_interest = hpo_level_1_terms$termid, df=phenotype_rank_all_by_year, normalize = FALSE)
+```
+
+```{r}
+hpo_level_1_terms <- phenotype_rank_all_by_year %>% filter(distancetoroot == 1) %>% select(termid, label) %>% distinct()
+plot_phenotypes_of_interest_by_year(terms_of_interest = hpo_level_1_terms$termid, df= phenotype_rank_all_by_year %>% left_join(tested_patient_count_by_year %>% rename(n_tested = n_patient), by = 'lab_year'), normalize = TRUE)
 ```
 
 
@@ -136,19 +350,19 @@ get_tested_phenotype_rank_all <- function(force_rerun=FALSE, cache_dir=CACHE_DIR
   
   if (force_rerun | !file.exists(df_path)){
     df <- dbGetQuery(dsca, "
-               with testable_phenotypes_direct as (
+               with testable_phenotypes_all as (
               	select lab.medical_record_number , lab.context_name , lab.lab_date , lab.lab_time , lab.loinc , testable.termid , testable.is_tested_directly 
               	from hai_az_prod.scc_and_epic_lab_after_loinc2hpo_2020july lab
               	join hai_az_prod.loinc_testable_phenotypes testable on lab.loinc = testable.loincid 
               	--where testable.is_tested_directly 
               ),
-              testable_phenotype_direct_freq as (
+              testable_phenotype_all_freq as (
               	select termid, count(*) as n_record, count(distinct medical_record_number) as n_patient
-              	from testable_phenotypes_direct
+              	from testable_phenotypes_all
               	group by termid 
               )
               select testable.*, hpo.label, hpo.distancetoroot 
-              from testable_phenotype_direct_freq testable
+              from testable_phenotype_all_freq testable
               join hai_az_prod.hpo hpo on testable.termid = hpo.termid
               order by n_record desc;
               ")
@@ -257,7 +471,7 @@ tested_phenotype_rank_all_by_race %>% filter(race == 'Asian' & distancetoroot ==
 tested_phenotype_rank_all_by_race %>% filter(race == 'White' & distancetoroot == 1) %>% arrange(-n_record) %>% head(10) %>% formattable::formattable()
 ```
 
-Plot the anual change of tested phenotypes. 
+Plot the annual change of tested phenotypes. 
 
 ```{r}
 get_tested_phenotype_rank_all_by_year <- function(force_rerun=FALSE, cache_dir=CACHE_DIR){
@@ -296,8 +510,13 @@ tested_phenotype_rank_all_by_year <- get_tested_phenotype_rank_all_by_year()
 
 ```{r}
 hpo_level_1_terms <- tested_phenotype_rank_all_by_year %>% filter(distancetoroot == 1) %>% select(termid, label) %>% distinct()
-plot_phenotypes_of_interest_by_year(terms_of_interest = hpo_level_1_terms$termid, df=tested_phenotype_rank_all_by_year)
+plot_phenotypes_of_interest_by_year(terms_of_interest = hpo_level_1_terms$termid, df=tested_phenotype_rank_all_by_year, normalize = FALSE)
 ```
+```{r}
+plot_phenotypes_of_interest_by_year(terms_of_interest = hpo_level_1_terms$termid, df=tested_phenotype_rank_all_by_year %>% left_join(tested_patient_count_by_year %>% rename(n_tested = n_patient), by = 'lab_year'), normalize = TRUE)
+```
+
+
 
 Some trends are pretty interesting, such as the spike of Abnormal cellular phenotype. The term has three children, but only one is tested: HP:0011017 Abnormal cellular physiology
 
@@ -322,9 +541,100 @@ children_of_interest <- c('HP:0010702', 'HP:0032336', 'HP:0410241', 'HP:0410240'
 plot_phenotypes_of_interest_by_year(terms_of_interest = children_of_interest, df=tested_phenotype_rank_all_by_year)
 ```
 
+Find what local lab codes are mapped to HP:0010702 Increased circulating antibody level and find which are tested more often after 2017.
 ```{r}
-children_of_interest <- c('HP:0410367', 'HP:0031047', 'HP:0003237', 'HP:0003212', 'HP:0003261', 'HP:0410369', 'HP:0410371', 'HP:0410246', 'HP:0003496')
-plot_phenotypes_of_interest_by_year(terms_of_interest = children_of_interest, df=tested_phenotype_rank_all_by_year)
+get_tested_phenotype_spike_by_loinc_year <- function(force_rerun=FALSE, cache_dir=CACHE_DIR){
+  df_path = glue('{cache_dir}/tested_phenotype_spike_by_loinc_year.csv')
+  
+  if (force_rerun | !file.exists(df_path)){
+    df <-  dbGetQuery(dsca, "
+              with lab_spike as (
+            	select context_name , lab.loinc , ltp.termid , date_part('Year', lab_date) as lab_year, count(*) as n_record, count(distinct medical_record_number) as n_patient
+            	from hai_az_prod.scc_and_epic_lab_after_loinc2hpo_2020july lab 
+            	join hai_az_prod.loinc_testable_phenotypes ltp on lab.loinc = ltp.loincid 
+            	where ltp.termid = 'HP:0010702'
+            	group by context_name , lab.loinc , ltp.termid, date_part('Year', lab_date)
+            )
+            select l.*
+            from lab_spike l
+            order by context_name , loinc , lab_year;
+              ")
+    
+    write.csv(df, file = df_path, row.names=FALSE)
+  }
+  
+  df <- read.csv(df_path)
+  
+  return (df)
+}
+
+
+get_tested_phenotype_spike_by_localcode_year <- function(force_rerun=FALSE, cache_dir=CACHE_DIR){
+  df_path = glue('{cache_dir}/tested_phenotype_spike_by_localcode_year.csv')
+  
+  if (force_rerun | !file.exists(df_path)){
+    df <-  dbGetQuery(dsca, "
+              with lab_spike as (
+            	select context_name , local_test_code , ltp.termid, date_part('Year', lab_date) as lab_year, count(*) as n_record, count(distinct medical_record_number) as n_patient
+            	from hai_az_prod.scc_and_epic_lab_after_loinc2hpo_2020july lab 
+            	join hai_az_prod.loinc_testable_phenotypes ltp on lab.loinc = ltp.loincid 
+            	where ltp.termid = 'HP:0010702'
+            	group by context_name , local_test_code ,ltp.termid,  date_part('Year', lab_date)
+            ),
+            local_lab_names as (
+            	select distinct source, code, test_name
+            	from hai_az_prod.loinc_mapping lm 
+            )
+            select l.*, r.test_name
+            from lab_spike l
+            join local_lab_names r on l.local_test_code = r.code
+            order by context_name , local_test_code , lab_year;
+              ")
+    
+    write.csv(df, file = df_path, row.names=FALSE)
+  }
+  
+  df <- read.csv(df_path)
+  
+  return (df)
+}
+
+
+tested_phenotype_spike_by_loinc_year <- get_tested_phenotype_spike_by_loinc_year()
+tested_phenotype_spike_by_localcode_year <- get_tested_phenotype_spike_by_localcode_year()
+```
+
+We can see the spike is caused by LOINC:10834-0 Globulin [Mass/volume] in Serum by calculation. 
+
+The SCC spike is for LOINC:2465-3 IgG [Mass/volume] in Serum or Plasma. The increase is significant, but the raw count is still negligible. 
+```{r}
+tested_phenotype_spike_by_loinc_year %>% 
+  left_join(tested_patient_count_by_year %>% rename(n_tested = n_patient), by = 'lab_year') %>%
+    filter(lab_year <= 2019 & lab_year > 2000) %>%
+  #filter(loinc == '10834-0') %>%
+    ggplot(aes(x = lab_year, y = n_patient/n_tested, group = loinc, color = loinc)) + 
+    geom_point() +
+    geom_line() +
+    #scale_color_discrete(breaks = loinc, labels = str_c('LOINC', loinc, sep = ":")) +
+    ylab('patient fraction among tested') +
+  facet_wrap(~context_name, nrow = 2, scales = 'free_y')
+```
+
+Similarly, if we use local codes for the plot, we can also see that EPIC lab test 3277 caused the spike, which has a name of "GLOBULIN". 
+```{r}
+tested_phenotype_spike_by_localcode_year %>% 
+  left_join(tested_patient_count_by_year %>% rename(n_tested = n_patient), by = 'lab_year') %>%
+    filter(lab_year <= 2019 & lab_year > 2000) %>%
+  group_by(context_name, local_test_code) %>%
+  mutate(min_year = min(lab_year), max_year = max(lab_year), max_min_year = max_year - min_year) %>%
+  filter(max_min_year > 2) %>%
+    ggplot(aes(x = lab_year, y = n_patient/n_tested, group = local_test_code, color = local_test_code)) + 
+    geom_point() +
+    geom_line() +
+    #scale_color_discrete(breaks = loinc, labels = str_c('LOINC', loinc, sep = ":")) +
+    ylab('patient fraction among tested') +
+  theme(legend.position = 'bottom') +
+  facet_wrap(~context_name, nrow = 2, scales = 'free_y')
 ```
 
 

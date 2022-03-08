@@ -1,6 +1,8 @@
 **/*.obj
 **/*.html
 
+**/.Rhistory
+
 # credential files
 **/.db_credential.R
 
