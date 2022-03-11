@@ -40,6 +40,19 @@ get_db_data <- function(sql, df_path, force_rerun=FALSE, cache_dir=CACHE_DIR){
 }
 ```
 
+
+### Identify starting cohort
+The starting cohort could be the entirety of the MSDW set, but here we focus on the subcohort where we have lab data for. 
+```{sql connection=dsca}
+create temp table cohort as 
+select distinct medical_record_number 
+from hai_az_prod.lab_scc_2020july lsj 
+union 
+select distinct mrn as medical_record_number 
+from hai_az_test.lab_epic_2020july lej ;
+```
+
+
 ### Collect patient basic demographics
 ```{r}
 get_patient_race_sex_distribution <- function(force_rerun=FALSE, cache_dir=CACHE_DIR){
@@ -49,6 +62,7 @@ get_patient_race_sex_distribution <- function(force_rerun=FALSE, cache_dir=CACHE
     df <- dbGetQuery(dsca, "
             select race, gender, count(*) as n
             from hai_az_prod.person_msdw_2020july pmj 
+            join cohort using (medical_record_number)
             group by race, gender 
             order by race, gender;
             ")
@@ -62,20 +76,21 @@ get_patient_race_sex_distribution <- function(force_rerun=FALSE, cache_dir=CACHE
   
 }
 
-patient_race_sex_distribution <- get_patient_race_sex_distribution()
+patient_race_sex_distribution <- get_patient_race_sex_distribution(force_rerun = FALSE)
+
 
 # recode all unknown gender as one category
-patient_race_sex_distribution <- patient_race_sex_distribution %>% 
+patient_race_sex_distribution <- patient_race_sex_distribution %>%
   mutate(gender = recode(gender, 'MSDW_NOT APPL' = 'Unknown')) %>%
   mutate(gender = recode(gender, 'MSDW_OTHER' = 'Unknown')) %>%
   mutate(gender = recode(gender, 'MSDW_UNKNOWN' = 'Unknown')) %>%
   mutate(gender = recode(gender, 'NOT AVAILABLE'= 'Unknown')) %>%
   mutate(gender = recode(gender, .missing = 'Unknown'))
 
+# the following cleaning are no longer needed after updating the race mapping file
 # recode "African American" as "Black or African American"
-# TODO: update the race map
-patient_race_sex_distribution <- patient_race_sex_distribution %>%
-  mutate(race = recode(race, 'African American' = 'Black or African American'))
+# patient_race_sex_distribution <- patient_race_sex_distribution %>%
+#   mutate(race = recode(race, 'African American' = 'Black or African American'))
 ```
 
 ```{r}
@@ -97,7 +112,6 @@ plot_by_sex <- ggplot(countByGender) +
 
 ggsave(filename = glue('{CACHE_DIR}/plot_by_sex.png'), plot = plot_by_sex, width = 2.5, height = 2.5)
 plot_by_sex
-
 ```
 
 
@@ -138,6 +152,7 @@ get_patient_birth_year_distribution <- function(force_rerun=FALSE, cache_dir=CAC
             )
             select birth_year, gender, count(*) as n 
             from person_birth_year 
+            join cohort using (medical_record_number)
             group by birth_year , gender 
             order by birth_year, gender;
             ")
@@ -151,7 +166,7 @@ get_patient_birth_year_distribution <- function(force_rerun=FALSE, cache_dir=CAC
   
 }
 
-patient_birth_year_sex_distribution <- get_patient_birth_year_distribution()
+patient_birth_year_sex_distribution <- get_patient_birth_year_distribution(FALSE)
 
 # lump together sex that can be treated as Unknown
 patient_birth_year_sex_distribution <- patient_birth_year_sex_distribution %>% 
@@ -198,10 +213,166 @@ plot_by_birth_year_sex
   
 ```
 
+### Success rate of LOINC2HPO
+```{r}
+# among all the labs, what is the percentage that can be mapped to HPO
+get_loinc2hpo_success_metric <- function(force_rerun=FALSE, cache_dir=CACHE_DIR){
+  df_path = glue('{cache_dir}/loinc2hpo_success_metric.csv')
+  
+  if (force_rerun | !file.exists(df_path)){
+    df <- dbGetQuery(dsca, "
+            with scc_lab_count as (
+            	select context_name , count(*) as n_test
+            	from hai_az_prod.lab_scc_2020july lsj 
+            	join hai_az_prod.fd_procedure fp using (procedure_key)
+            	group by context_name
+            ),
+            epic_lab as (
+            	select distinct mrn, order_date, lab_time , test_code, test_result_value  from prod_msdw.epic_lab el
+            ),
+            epic_lab_count as (
+            	select 'EPIC' as context_name, count(*) as n_test from epic_lab
+            ),
+            lab_count as (
+            	select * from scc_lab_count 
+            	union all 
+            	select * from epic_lab_count 
+            ),
+            loinc_success_count as (
+            	select context_name , count(*) as n_loinc_success
+            	from hai_az_prod.scc_and_epic_lab_after_loinc2hpo_2020july saelalhj 
+            	where loinc is not null
+            	group by context_name
+            ),
+            loinc2hpo_success_count as (
+            	select context_name , count(*) as n_loinc2hpo_success
+            	from hai_az_prod.scc_and_epic_lab_after_loinc2hpo_2020july saelalhj 
+            	where hpotermid is not null
+            	group by context_name 
+            )
+            select *, (n_loinc_success + 0.1)/n_test as loinc_success_rate, (n_loinc2hpo_success + 0.1)/n_test as loinc2hpo_success_rate
+            from lab_count
+            left join loinc_success_count using (context_name)
+            left join loinc2hpo_success_count using (context_name);
+            ")
+    
+    write.csv(df, file = df_path, row.names=FALSE)
+  }
+  
+  df <- read.csv(df_path)
+  
+  return (df)
+  
+}
+
+loinc2hpo_success_metric <- get_loinc2hpo_success_metric(TRUE)
+
+loinc2hpo_success_metric <- loinc2hpo_success_metric %>% mutate(across(function(x) is.numeric(x), function(x) replace_na(x, 0)))
+
+loinc2hpo_success_metric %>% mutate(across(function(x) is.double(x), function(x) round(x, digits = 3))) %>%
+  arrange(-n_test)
+```
+The overall success rate : `sum(loinc2hpo_success_metric$n_success) / sum(loinc2hpo_success_metric$n_test)`
+```{r}
+overall_success_rate <- sum(loinc2hpo_success_metric$n_success) / sum(loinc2hpo_success_metric$n_test)
+print(glue('Total Lab Results: {sum(loinc2hpo_success_metric$n_test)}, 
+           Total Lab Mapped to LOINC: {sum(loinc2hpo_success_metric$n_loinc_success)}
+           Total Lab Transformed to HPO: {sum(loinc2hpo_success_metric$n_loinc2hpo_success)}'))
+
+print(glue('Total LOINC Mapping Rate: {sum(loinc2hpo_success_metric$n_loinc_success)/sum(loinc2hpo_success_metric$n_test)},
+           Total HPO transformation Rate: {sum(loinc2hpo_success_metric$n_loinc2hpo_success)/sum(loinc2hpo_success_metric$n_test)}'))
+```
+
 
 ### Count patient distribution by the number of HPO terms per patient 
 ```{r}
+# prepare a summary table: summary_hpo_counts_per_patient 
+# rows: per patient
+# columns: medical_record_number, hpo, unique hpo, abnormal_hpo, unique_abnormal_hpo, unique_abnormal_hpo_inference
 
+# collect statistics for the starting cohort
+# The mapping procedure assigned an average of 633 laboratory test-derived HPO terms per individual patient, many of which were from the same laboratory tests performed at different visits. The tests corresponded to a mean of 57.7 unique HPO terms, of which 20.8 were abnormalities and the remainder were normal phenotypes (Fig. 4e). The hierarchical structure of the HPO allows inferences to be propagated up to parent terms and their ancestors;14 using this method, we inferred an additional 51.2 HPO terms (total 73.5) based on 22.2 abnormalities for each patient
+# how many phenotypes are mapped from lab tests? # unique phenotypes? then break down to normal and abnormal
+# how many unique abnormal phenotypes for each patient? then after HPO inference
+
+get_hpo_counts_per_patient <- function(force_rerun=FALSE, cache_dir=CACHE_DIR){
+  df_path = glue('{cache_dir}/hpo_counts_per_patient.csv')
+  
+  if (force_rerun | !file.exists(df_path)){
+    df <- dbGetQuery(dsca, "
+            with count_no_inference as (
+            	select medical_record_number , count(*) as n_hpo, count(distinct case when isnegated then 'NOT' else '' end || hpotermid) as n_distinct_hpo
+            	from hai_az_prod.scc_and_epic_lab_after_loinc2hpo_2020july lab 
+            	where hpotermid is not null
+            	group by medical_record_number  
+            ),
+            count_abnormal_no_inference as (
+            	select medical_record_number , count(distinct hpotermid) as n_distinct_abnormal_hpo
+            	from hai_az_prod.scc_and_epic_lab_after_loinc2hpo_2020july lab 
+            	where hpotermid is not null and not isnegated 
+            	group by medical_record_number
+            ),
+            count_abnormal_with_inference as (
+            	select medical_record_number , count(distinct ancestor) as n_distinct_abnormal_hpo_infer
+            	from hai_az_prod.scc_and_epic_lab_after_loinc2hpo_2020july lab 
+            	join hai_az_prod.hpo_is_a_pairs hiap on lab.hpotermid = hiap.current 
+            	where hpotermid is not null and not isnegated 
+            	group by medical_record_number
+            )
+            select c1.n_hpo, c1.n_distinct_hpo, c2.n_distinct_abnormal_hpo, c3.n_distinct_abnormal_hpo_infer 
+            from cohort p 
+            left join count_no_inference c1 using (medical_record_number) 
+            left join count_abnormal_no_inference c2 using (medical_record_number)
+            left join count_abnormal_with_inference c3 using (medical_record_number);
+            ")
+    
+    write.csv(df, file = df_path, row.names=FALSE)
+  }
+  
+  df <- read.csv(df_path)
+  
+  return (df)
+}
+
+hpo_counts_per_patient <- get_hpo_counts_per_patient(TRUE)
+hpo_counts_per_patient <- hpo_counts_per_patient %>% 
+  replace_na(list(n_hpo = 0, n_distinct_hpo = 0, n_distinct_abnormal_hpo = 0, n_distinct_abnormal_hpo_infer = 0))
+```
+
+Report out the patient level phenotype counts
+```{r}
+# mean
+sapply(hpo_counts_per_patient, mean)
+
+# median 
+sapply(hpo_counts_per_patient, median)
+```
+
+Plot the distribution of distinct phenotypes for each patient (including abnormal and abnormal)
+```{r}
+plot_by_phenotypes_per_patient <- ggplot(hpo_counts_per_patient) +
+  geom_histogram(aes(x = n_distinct_hpo, y = ..count../1000), binwidth = 10, fill = 'orange', color = 'black', size = 0.25) +
+  xlab('number of unique phenotypes for each patient') +
+  ylab('patient counts (in thousands)') + 
+  theme_bw() +
+  theme(panel.grid = element_blank(),
+        axis.title = element_text(size = 8), axis.text = element_text(size = 8), 
+        legend.text = element_text(size = 8), legend.title = element_text(size = 10))
+ggsave(filename = glue("{CACHE_DIR}/plotByPhenotypesPerPatient.png"), plot = plot_by_phenotypes_per_patient, width = 3, height = 2)
+plot_by_phenotypes_per_patient
+```
+Plot distribution of abnormal phenotypes (distinct) after inference
+```{r}
+plot_by_distinct_abnormal_hpo_infer_per_patient <- ggplot(hpo_counts_per_patient) +
+  geom_histogram(aes(x = n_distinct_abnormal_hpo_infer, y = ..count../1000), binwidth = 10, fill = 'orange', color = 'black', size = 0.25) +
+  xlab('number of unique phenotypes for each patient') +
+  ylab('patient counts (in thousands)') + 
+  theme_bw() +
+  theme(panel.grid = element_blank(),
+        axis.title = element_text(size = 8), axis.text = element_text(size = 8), 
+        legend.text = element_text(size = 8), legend.title = element_text(size = 10))
+ggsave(filename = glue("{CACHE_DIR}/plotByDistinctAbnormalPhenotypeInferPerPatient.png"), plot = plot_by_distinct_abnormal_hpo_infer_per_patient, width = 3, height = 2)
+plot_by_distinct_abnormal_hpo_infer_per_patient
 ```
 
 
