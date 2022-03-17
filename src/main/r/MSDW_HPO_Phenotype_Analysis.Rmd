@@ -38,6 +38,8 @@ get_db_data <- function(sql, df_path, force_rerun=FALSE, cache_dir=CACHE_DIR){
   
   return (df)
 }
+
+FORCE_RERUN <- FALSE
 ```
 
 
@@ -413,9 +415,53 @@ get_tested_patient_count_by_year <- function(force_rerun=FALSE, cache_dir=CACHE_
   return (df)
 }
 
-tested_patient_count_by_year <- get_tested_patient_count_by_year()
+tested_patient_count_by_year <- get_tested_patient_count_by_year(force_rerun=FORCE_RERUN)
 ```
 
+Collect tested patients by year, race and sex.
+
+```{r}
+get_tested_patient_count_by_year_race_sex <- function(force_rerun=FALSE, cache_dir=CACHE_DIR){
+  df_path = glue('{cache_dir}/tested_patient_count_by_year_race_sex.csv')
+  
+  if (force_rerun | !file.exists(df_path)){
+    df <- dbGetQuery(dsca, "
+            with scc_lab as (
+            	select medical_record_number , calendar_date as lab_date, date_part('Year', lab_date) as lab_year
+            	from hai_az_prod.lab_scc_2020july lsj
+            ), 
+            epic_lab as (
+            	select mrn as medical_record_number, order_date as lab_date, date_part('Year', lab_date) as lab_year
+            	from hai_az_test.lab_epic_2020july lej
+            ),
+            scc_and_epic as (
+            	select * 
+            	from scc_lab 
+            	union all
+            	select * 
+            	from epic_lab
+            ),
+            scc_and_epic_with_race as (
+            	select lab.*, p.race, p.gender
+            	from scc_and_epic lab
+            	join hai_az_prod.person_msdw_2020july p using (medical_record_number)
+            )
+            select lab_year, race, gender, count(distinct medical_record_number) as n_patient
+            from scc_and_epic_with_race
+            group by lab_year, race, gender
+            order by lab_year, race, gender;
+            ")
+    
+    write.csv(df, file = df_path, row.names=FALSE)
+  }
+  
+  df <- read.csv(df_path)
+  
+  return (df)
+}
+
+tested_patient_count_by_year_race_sex <- get_tested_patient_count_by_year_race_sex(force_rerun=FORCE_RERUN)
+```
 
 ### Analyze changes of observed phenotypes
 We will used the persisted lab test table for this analysis. 
@@ -447,16 +493,63 @@ get_phenotype_rank_all_by_year <- function(force_rerun=FALSE, cache_dir=CACHE_DI
   return (df)
 }
 
-phenotype_rank_all_by_year <- get_phenotype_rank_all_by_year()
+phenotype_rank_all_by_year <- get_phenotype_rank_all_by_year(force_rerun = FORCE_RERUN)
+
+
+get_phenotype_rank_all_by_year_race_sex <- function(force_rerun=FALSE, cache_dir=CACHE_DIR){
+  df_path = glue('{cache_dir}/observed_phenotype_rank_all_by_year_race_sex.csv')
+  
+  if (force_rerun | !file.exists(df_path)){
+    df <- dbGetQuery(dsca, "
+      with abnormal_lab as 
+      	(select * 
+      	from hai_az_prod.scc_and_epic_lab_after_loinc2hpo_2020july lab 
+      	where hpotermid is not null and not isnegated
+      	),
+      abnormal_lab_after_infer as 
+      	(SELECT l.medical_record_number, l.lab_date, date_part(year, lab_date) as lab_year, l.local_test_code, l.loinc, l.hpotermid, l.isnegated, pair.ancestor , pair.distance
+      	FROM abnormal_lab l 
+      	left join hai_az_prod.hpo_is_a_pairs pair on l.hpotermid = pair.current),
+      lab_freq_by_year_race_sex as (
+      	select ancestor as termid, lab_year, p.race, p.gender, count(*) as n_record, count(distinct medical_record_number) as n_patient 
+      	from abnormal_lab_after_infer 
+      	join hai_az_prod.person_msdw_2020july p using (medical_record_number)
+      	group by ancestor, lab_year, p.race, p.gender
+      )
+      select *
+      from lab_freq_by_year_race_sex
+      join hai_az_prod.hpo h using (termid)
+      order by lab_year, distancetoroot;")
+    
+    write.csv(df, file = df_path, row.names=FALSE)
+  }
+  
+  df <- read.csv(df_path)
+  
+  return (df)
+}
+
+phenotype_rank_all_by_year_race_sex <- get_phenotype_rank_all_by_year_race_sex(force_rerun = FORCE_RERUN)
 ```
 
 
 ```{r}
+fancy_scientific <- function(l) {
+     # turn in to character string in scientific notation
+     l <- format(l, scientific = TRUE)
+     # quote the part before the exponent to keep all the digits
+     l <- gsub("^(.*)e", "'\\1'e", l)
+     # turn the 'e+' into plotmath format
+     l <- gsub("e", "%*%10^", l)
+     # return this as an expression
+     parse(text=l)
+}
+
 plot_phenotypes_of_interest_by_year <- function(terms_of_interest, df, normalize=TRUE){
   hpo_terms_selected <- df %>% filter(termid %in% terms_of_interest) %>% select(termid, label) %>% distinct()
   
   y_str = ifelse(normalize, 'n_patient/n_tested', 'n_patient')
-  y_label = ifelse(normalize, 'patient fraction among tested', 'patient count')
+  y_label = ifelse(normalize, 'patient fraction normalized to database size', 'patient count')
 
   p <- df %>% filter(termid %in% terms_of_interest) %>% 
     filter(lab_year <= 2019 & lab_year > 2000) %>%
@@ -464,20 +557,62 @@ plot_phenotypes_of_interest_by_year <- function(terms_of_interest, df, normalize
     geom_point() +
     geom_line() +
     scale_color_discrete(breaks = hpo_terms_selected$termid, labels = str_c(hpo_terms_selected$termid, hpo_terms_selected$label, sep = " ")) +
-    ylab(y_label)
+    xlab('Year') +
+    ylab(y_label) +
+    theme_bw() +
+    theme(panel.grid = element_blank(),
+        axis.title = element_text(size = 8), axis.text = element_text(size = 8), 
+        legend.text = element_text(size = 8), legend.title = element_text(size = 10))
   
   return (p)
 }
 
+
+
 hpo_level_1_terms <- phenotype_rank_all_by_year %>% filter(distancetoroot == 1) %>% select(termid, label) %>% distinct()
-plot_phenotypes_of_interest_by_year(terms_of_interest = hpo_level_1_terms$termid, df=phenotype_rank_all_by_year, normalize = FALSE)
+p <- plot_phenotypes_of_interest_by_year(terms_of_interest = hpo_level_1_terms$termid, df=phenotype_rank_all_by_year, normalize = FALSE)
+ggsave(filename = glue('{CACHE_DIR}/plot_abnormal_phenotypes_by_year_level_1.pdf'), plot = p, width = 8, height = 4)
+p
 ```
 
 ```{r}
 hpo_level_1_terms <- phenotype_rank_all_by_year %>% filter(distancetoroot == 1) %>% select(termid, label) %>% distinct()
-plot_phenotypes_of_interest_by_year(terms_of_interest = hpo_level_1_terms$termid, df= phenotype_rank_all_by_year %>% left_join(tested_patient_count_by_year %>% rename(n_tested = n_patient), by = 'lab_year'), normalize = TRUE)
+p <- plot_phenotypes_of_interest_by_year(terms_of_interest = hpo_level_1_terms$termid, df= phenotype_rank_all_by_year %>%
+                                           left_join(tested_patient_count_by_year %>% rename(n_tested = n_patient), by = 'lab_year'), normalize = TRUE)
+ggsave(filename = glue('{CACHE_DIR}/plot_abnormal_phenotypes_by_year_level_1_normalized.pdf'), plot = p, width = 8, height = 4)
+p
 ```
 
+Which trend line in the above plot are statistically significant?
+```{r}
+df= phenotype_rank_all_by_year %>% left_join(tested_patient_count_by_year %>% rename(n_tested = n_patient), by = 'lab_year')
+trendline_lm_test <- df %>% 
+  filter(distancetoroot == 1) %>% 
+  filter(lab_year > 2000) %>% 
+  mutate(fraction = n_patient / n_tested) %>%
+  select(termid, lab_year, label, fraction) %>% 
+  group_by(termid, label) %>% 
+  nest() %>% 
+  mutate(lm_model = map(data, function(d) lm(fraction ~ lab_year, data = d))) %>%
+  mutate(lm_coeff = map(lm_model, broom::tidy)) %>%
+  select(-data, -lm_model) %>% 
+  unnest(lm_coeff) %>% 
+  filter(term == 'lab_year') %>% 
+  mutate(p.value.bonferroni = p.value * 10)
+
+symnum(trendline_lm_test$p.value.bonferroni, cutpoints = c(0, 0.001, 0.01, 0.05, 0.1, Inf), symbols = c("***", "**", "*", ".", " "))
+  
+trendline_lm_test_formatted <- trendline_lm_test %>% select(termid, label, estimate, p.value, p.value.bonferroni) %>% 
+  arrange(p.value.bonferroni) %>%
+  rename(beta = estimate) %>% 
+  mutate(significance = symnum(p.value.bonferroni, cutpoints = c(0, 0.001, 0.01, 0.05, 0.1, Inf), symbols = c("***", "**", "*", ".", " ")) ) %>% 
+  mutate(across(.cols = function(x) is.double(x), function(x) scales::scientific(x, digits = 3)))
+  
+
+write.csv(trendline_lm_test_formatted, file = glue('{CACHE_DIR}/table_abnormal_phenotypes_by_year_level_1_normalized_trendline_lm_model.csv'), row.names=FALSE)
+
+trendline_lm_test_formatted
+```
 
 
 ### Analyze the tested phenotypes 
@@ -546,8 +681,8 @@ get_tested_phenotype_rank_all <- function(force_rerun=FALSE, cache_dir=CACHE_DIR
   return (df)
 }
 
-tested_phenotype_rank_direct <- get_tested_phenotype_rank_direct()
-tested_phenotype_rank_all <- get_tested_phenotype_rank_all()
+tested_phenotype_rank_direct <- get_tested_phenotype_rank_direct(force_rerun = FORCE_RERUN)
+tested_phenotype_rank_all <- get_tested_phenotype_rank_all(force_rerun = FORCE_RERUN)
 ```
 
 
@@ -562,7 +697,211 @@ For the directly/indirectly tested phenotypes, we can determine at the higher le
 tested_phenotype_rank_all %>% filter(distancetoroot == 1) %>% arrange(-n_record) %>% select(-distancetoroot)
 ```
 
-For both cases, it would be interesting to learn about the changes of the lab phenotypes over time, and among different races.
+
+
+Plot the annual change of tested phenotypes. 
+
+```{r}
+get_tested_phenotype_rank_all_by_year <- function(force_rerun=FALSE, cache_dir=CACHE_DIR){
+  df_path = glue('{cache_dir}/tested_phenotype_rank_all_by_year.csv')
+  
+  if (force_rerun | !file.exists(df_path)){
+    df <-  dbGetQuery(dsca, "
+              with testable_phenotypes_direct as (
+              	select lab.medical_record_number , person.race, lab.context_name , lab.lab_date , lab.lab_time , date_part(year, lab_date) as lab_year, lab.loinc , testable.termid , testable.is_tested_directly 
+              	from hai_az_prod.scc_and_epic_lab_after_loinc2hpo_2020july lab
+              	join hai_az_prod.loinc_testable_phenotypes testable on lab.loinc = testable.loincid 
+              	join hai_az_prod.person_msdw_2020july person using (medical_record_number)
+              	--where testable.is_tested_directly 
+              ),
+              testable_phenotype_direct_freq as (
+              	select termid, lab_year, count(*) as n_record, count(distinct medical_record_number) as n_patient
+              	from testable_phenotypes_direct
+              	group by termid, lab_year
+              )
+              select testable.*, hpo.label, hpo.distancetoroot 
+              from testable_phenotype_direct_freq testable
+              join hai_az_prod.hpo hpo on testable.termid = hpo.termid
+              order by termid, lab_year;
+              ")
+    
+    write.csv(df, file = df_path, row.names=FALSE)
+  }
+  
+  df <- read.csv(df_path)
+  
+  return (df)
+}
+
+tested_phenotype_rank_all_by_year <- get_tested_phenotype_rank_all_by_year(force_rerun = FORCE_RERUN)
+```
+
+```{r}
+hpo_level_1_terms <- tested_phenotype_rank_all_by_year %>% filter(distancetoroot == 1) %>% select(termid, label) %>% distinct()
+p <- plot_phenotypes_of_interest_by_year(terms_of_interest = hpo_level_1_terms$termid, df=tested_phenotype_rank_all_by_year, normalize = FALSE)
+ggsave(filename = glue('{CACHE_DIR}/plot_tested_phenotypes_by_year_level_1.pdf'), plot = p, width = 8, height = 4)
+p
+```
+```{r}
+p <- plot_phenotypes_of_interest_by_year(terms_of_interest = hpo_level_1_terms$termid, df=tested_phenotype_rank_all_by_year %>% left_join(tested_patient_count_by_year %>% rename(n_tested = n_patient), by = 'lab_year'), normalize = TRUE)
+ggsave(filename = glue('{CACHE_DIR}/plot_tested_phenotypes_by_year_level_1_normalized.pdf'), plot = p, width = 8, height = 4)
+p
+```
+
+
+```{r}
+df= tested_phenotype_rank_all_by_year %>% left_join(tested_patient_count_by_year %>% rename(n_tested = n_patient), by = 'lab_year')
+trendline_lm_test <- df %>% 
+  filter(distancetoroot == 1) %>% 
+  filter(lab_year > 2000) %>% 
+  mutate(fraction = n_patient / n_tested) %>%
+  select(termid, lab_year, label, fraction) %>% 
+  group_by(termid, label) %>% 
+  nest() %>% 
+  mutate(lm_model = map(data, function(d) lm(fraction ~ lab_year, data = d))) %>%
+  mutate(lm_coeff = map(lm_model, broom::tidy)) %>%
+  select(-data, -lm_model) %>% 
+  unnest(lm_coeff) %>% 
+  filter(term == 'lab_year') %>% 
+  mutate(p.value.bonferroni = p.value * 11)
+  
+trendline_lm_test_formatted <- trendline_lm_test %>% select(termid, label, estimate, p.value, p.value.bonferroni) %>% 
+  arrange(p.value.bonferroni) %>%
+  rename(beta = estimate) %>% 
+  mutate(significance = symnum(p.value.bonferroni, cutpoints = c(0, 0.001, 0.01, 0.05, 0.1, Inf), symbols = c("***", "**", "*", ".", " ")) ) %>% 
+  mutate(across(.cols = function(x) is.double(x), function(x) scales::scientific(x, digits = 3)))
+  
+
+write.csv(trendline_lm_test_formatted, file = glue('{CACHE_DIR}/table_tested_phenotypes_by_year_level_1_normalized_trendline_lm_model.csv'), row.names=FALSE)
+
+trendline_lm_test_formatted
+```
+
+
+Some trends are pretty interesting, such as the spike of Abnormal cellular phenotype. The term has three children, but only one is tested: HP:0011017 Abnormal cellular physiology
+
+```{r}
+children_abnormal_cellular_physiology <- c('HP:0003220', 'HP:0011018', 'HP:0025463', 'HP:0011019', 'HP:0003254', 'HP:4000056', 'HP:0011133', 'HP:0004371', 'HP:0031377', 'HP:0031409', 'HP:0012103', 'HP:0032576', 'HP:0003204', 'HP:0004356', 'HP:0032571', 'HP:0002916', 'HP:0003224', 'HP:0003575', 'HP:0003358')
+plot_phenotypes_of_interest_by_year(terms_of_interest = children_abnormal_cellular_physiology, df=tested_phenotype_rank_all_by_year %>% left_join(tested_patient_count_by_year %>% rename(n_tested = n_patient), by = 'lab_year'))
+```
+
+Again, the above plot shows that it is driven by one HP:0031409 Abnormal lymphocyte physiology. 
+```{r}
+children_of_interest <- c('HP:0011840', 'HP:0030886', 'HP:0012177', 'HP:0005372', 'HP:0031378')
+plot_phenotypes_of_interest_by_year(terms_of_interest = children_of_interest, df=tested_phenotype_rank_all_by_year %>% left_join(tested_patient_count_by_year %>% rename(n_tested = n_patient), by = 'lab_year'))
+```
+```{r}
+children_of_interest <- c('HP:0002847', 'HP:0002959', 'HP:0005384', 'HP:0041076', 'HP:0010701')
+plot_phenotypes_of_interest_by_year(terms_of_interest = children_of_interest, df=tested_phenotype_rank_all_by_year %>% left_join(tested_patient_count_by_year %>% rename(n_tested = n_patient), by = 'lab_year'))
+```
+
+
+```{r}
+children_of_interest <- c('HP:0010702', 'HP:0032336', 'HP:0410241', 'HP:0410240', 'HP:0410243', 'HP:0410242', 'HP:0410244', 'HP:0004313')
+plot_phenotypes_of_interest_by_year(terms_of_interest = children_of_interest, df=tested_phenotype_rank_all_by_year %>% left_join(tested_patient_count_by_year %>% rename(n_tested = n_patient), by = 'lab_year'))
+```
+
+Find what local lab codes are mapped to HP:0010702 Increased circulating antibody level and find which are tested more often after 2017.
+```{r}
+get_tested_phenotype_spike_by_loinc_year <- function(force_rerun=FALSE, cache_dir=CACHE_DIR){
+  df_path = glue('{cache_dir}/tested_phenotype_spike_by_loinc_year.csv')
+  
+  if (force_rerun | !file.exists(df_path)){
+    df <-  dbGetQuery(dsca, "
+              with lab_spike as (
+            	select context_name , lab.loinc , ltp.termid , date_part('Year', lab_date) as lab_year, count(*) as n_record, count(distinct medical_record_number) as n_patient
+            	from hai_az_prod.scc_and_epic_lab_after_loinc2hpo_2020july lab 
+            	join hai_az_prod.loinc_testable_phenotypes ltp on lab.loinc = ltp.loincid 
+            	where ltp.termid = 'HP:0010702'
+            	group by context_name , lab.loinc , ltp.termid, date_part('Year', lab_date)
+            )
+            select l.*
+            from lab_spike l
+            order by context_name , loinc , lab_year;
+              ")
+    
+    write.csv(df, file = df_path, row.names=FALSE)
+  }
+  
+  df <- read.csv(df_path)
+  
+  return (df)
+}
+
+
+get_tested_phenotype_spike_by_localcode_year <- function(force_rerun=FALSE, cache_dir=CACHE_DIR){
+  df_path = glue('{cache_dir}/tested_phenotype_spike_by_localcode_year.csv')
+  
+  if (force_rerun | !file.exists(df_path)){
+    df <-  dbGetQuery(dsca, "
+              with lab_spike as (
+            	select context_name , local_test_code , ltp.termid, date_part('Year', lab_date) as lab_year, count(*) as n_record, count(distinct medical_record_number) as n_patient
+            	from hai_az_prod.scc_and_epic_lab_after_loinc2hpo_2020july lab 
+            	join hai_az_prod.loinc_testable_phenotypes ltp on lab.loinc = ltp.loincid 
+            	where ltp.termid = 'HP:0010702'
+            	group by context_name , local_test_code ,ltp.termid,  date_part('Year', lab_date)
+            ),
+            local_lab_names as (
+            	select distinct source, code, test_name
+            	from hai_az_prod.loinc_mapping lm 
+            )
+            select l.*, r.test_name
+            from lab_spike l
+            join local_lab_names r on l.local_test_code = r.code
+            order by context_name , local_test_code , lab_year;
+              ")
+    
+    write.csv(df, file = df_path, row.names=FALSE)
+  }
+  
+  df <- read.csv(df_path)
+  
+  return (df)
+}
+
+
+tested_phenotype_spike_by_loinc_year <- get_tested_phenotype_spike_by_loinc_year(force_rerun = FORCE_RERUN)
+tested_phenotype_spike_by_localcode_year <- get_tested_phenotype_spike_by_localcode_year(force_rerun = FORCE_RERUN)
+```
+
+We can see the spike is caused by LOINC:10834-0 Globulin [Mass/volume] in Serum by calculation. 
+
+The SCC spike is for LOINC:2465-3 IgG [Mass/volume] in Serum or Plasma. The increase is significant, but the raw count is still negligible. 
+```{r}
+tested_phenotype_spike_by_loinc_year %>% 
+  left_join(tested_patient_count_by_year %>% rename(n_tested = n_patient), by = 'lab_year') %>%
+    filter(lab_year <= 2019 & lab_year > 2000) %>%
+  #filter(loinc == '10834-0') %>%
+    ggplot(aes(x = lab_year, y = n_patient/n_tested, group = loinc, color = loinc)) + 
+    geom_point() +
+    geom_line() +
+    #scale_color_discrete(breaks = loinc, labels = str_c('LOINC', loinc, sep = ":")) +
+    ylab('patient fraction among tested') +
+  facet_wrap(~context_name, nrow = 2, scales = 'free_y')
+```
+
+Similarly, if we use local codes for the plot, we can also see that EPIC lab test 3277 caused the spike, which has a name of "GLOBULIN". 
+```{r}
+tested_phenotype_spike_by_localcode_year %>% 
+  left_join(tested_patient_count_by_year %>% rename(n_tested = n_patient), by = 'lab_year') %>%
+    filter(lab_year <= 2019 & lab_year > 2000) %>%
+  group_by(context_name, local_test_code) %>%
+  mutate(min_year = min(lab_year), max_year = max(lab_year), max_min_year = max_year - min_year) %>%
+  filter(max_min_year > 2) %>%
+    ggplot(aes(x = lab_year, y = n_patient/n_tested, group = local_test_code, color = local_test_code)) + 
+    geom_point() +
+    geom_line() +
+    #scale_color_discrete(breaks = loinc, labels = str_c('LOINC', loinc, sep = ":")) +
+    ylab('patient fraction among tested') +
+  theme(legend.position = 'bottom') +
+  facet_wrap(~context_name, nrow = 2, scales = 'free_y')
+```
+
+### Analyze racial differences
+
+#### racial differences of tested phenotypes
+
+The section analyzed whether there are racial differences in tested phenotypes. The problem is that we saw the vast majority of terms have differences. This is probably just a large number effect. 
 
 ```{r}
 get_tested_phenotype_rank_direct_by_race <- function(force_rerun=FALSE, cache_dir=CACHE_DIR){
@@ -625,187 +964,166 @@ get_tested_phenotype_rank_all_by_race <- function(force_rerun=FALSE, cache_dir=C
   return (df)
 }
 
-tested_phenotype_rank_direct_by_race <- get_tested_phenotype_rank_direct_by_race()
-tested_phenotype_rank_all_by_race <- get_tested_phenotype_rank_all_by_race()
+tested_phenotype_rank_direct_by_race <- get_tested_phenotype_rank_direct_by_race(force_rerun = FORCE_RERUN)
+tested_phenotype_rank_all_by_race <- get_tested_phenotype_rank_all_by_race(force_rerun = FORCE_RERUN)
 ```
 
-For each directly measured phenotype, we can determine whether race and the tests are correlated by some form of Chi-squared teste.
-```{r}
-tested_phenotype_rank_direct_by_race %>% filter(race == 'African American') %>% arrange(-n_record) %>% head(10) %>% formattable::formattable()
-tested_phenotype_rank_direct_by_race %>% filter(race == 'Asian') %>% arrange(-n_record) %>% head(10) %>% formattable::formattable()
-tested_phenotype_rank_direct_by_race %>% filter(race == 'White') %>% arrange(-n_record) %>% head(10) %>% formattable::formattable()
-```
 
+For each directly measured phenotype, we can determine whether race and the tests are correlated by some form of Chi-squared test. The current problem is that the most phenotype terms are statistically significant. 
+@TODO we should look at phenotypes at each year. 
 ```{r}
-tested_phenotype_rank_all_by_race %>% filter(race == 'African American' & distancetoroot == 1) %>% arrange(-n_record) %>% head(10) %>% formattable::formattable()
-tested_phenotype_rank_all_by_race %>% filter(race == 'Asian' & distancetoroot == 1) %>% arrange(-n_record) %>% head(10) %>% formattable::formattable()
-tested_phenotype_rank_all_by_race %>% filter(race == 'White' & distancetoroot == 1) %>% arrange(-n_record) %>% head(10) %>% formattable::formattable()
-```
+countByRace <- patient_race_sex_distribution %>% 
+  group_by(race) %>% 
+  summarise(dbtotal = sum(n))
 
-Plot the annual change of tested phenotypes. 
 
-```{r}
-get_tested_phenotype_rank_all_by_year <- function(force_rerun=FALSE, cache_dir=CACHE_DIR){
-  df_path = glue('{cache_dir}/tested_phenotype_rank_all_by_year.csv')
-  
-  if (force_rerun | !file.exists(df_path)){
-    df <-  dbGetQuery(dsca, "
-              with testable_phenotypes_direct as (
-              	select lab.medical_record_number , person.race, lab.context_name , lab.lab_date , lab.lab_time , date_part(year, lab_date) as lab_year, lab.loinc , testable.termid , testable.is_tested_directly 
-              	from hai_az_prod.scc_and_epic_lab_after_loinc2hpo_2020july lab
-              	join hai_az_prod.loinc_testable_phenotypes testable on lab.loinc = testable.loincid 
-              	join hai_az_prod.person_msdw_2020july person using (medical_record_number)
-              	--where testable.is_tested_directly 
-              ),
-              testable_phenotype_direct_freq as (
-              	select termid, lab_year, count(*) as n_record, count(distinct medical_record_number) as n_patient
-              	from testable_phenotypes_direct
-              	group by termid, lab_year
-              )
-              select testable.*, hpo.label, hpo.distancetoroot 
-              from testable_phenotype_direct_freq testable
-              join hai_az_prod.hpo hpo on testable.termid = hpo.termid
-              order by termid, lab_year;
-              ")
-    
-    write.csv(df, file = df_path, row.names=FALSE)
-  }
-  
-  df <- read.csv(df_path)
-  
-  return (df)
+phenotype_race_chisq_test <- function(df) {
+  broom::tidy(chisq.test(df$observed, p = df$dbtotal/sum(df$dbtotal)))
 }
 
-tested_phenotype_rank_all_by_year <- get_tested_phenotype_rank_all_by_year()
-```
-
-```{r}
-hpo_level_1_terms <- tested_phenotype_rank_all_by_year %>% filter(distancetoroot == 1) %>% select(termid, label) %>% distinct()
-plot_phenotypes_of_interest_by_year(terms_of_interest = hpo_level_1_terms$termid, df=tested_phenotype_rank_all_by_year, normalize = FALSE)
-```
-```{r}
-plot_phenotypes_of_interest_by_year(terms_of_interest = hpo_level_1_terms$termid, df=tested_phenotype_rank_all_by_year %>% left_join(tested_patient_count_by_year %>% rename(n_tested = n_patient), by = 'lab_year'), normalize = TRUE)
-```
-
-
-
-Some trends are pretty interesting, such as the spike of Abnormal cellular phenotype. The term has three children, but only one is tested: HP:0011017 Abnormal cellular physiology
-
-```{r}
-children_abnormal_cellular_physiology <- c('HP:0003220', 'HP:0011018', 'HP:0025463', 'HP:0011019', 'HP:0003254', 'HP:4000056', 'HP:0011133', 'HP:0004371', 'HP:0031377', 'HP:0031409', 'HP:0012103', 'HP:0032576', 'HP:0003204', 'HP:0004356', 'HP:0032571', 'HP:0002916', 'HP:0003224', 'HP:0003575', 'HP:0003358')
-plot_phenotypes_of_interest_by_year(terms_of_interest = children_abnormal_cellular_physiology, df=tested_phenotype_rank_all_by_year)
-```
-
-Again, the above plot shows that it is driven by one HP:0031409 Abnormal lymphocyte physiology. 
-```{r}
-children_of_interest <- c('HP:0011840', 'HP:0030886', 'HP:0012177', 'HP:0005372', 'HP:0031378')
-plot_phenotypes_of_interest_by_year(terms_of_interest = children_of_interest, df=tested_phenotype_rank_all_by_year)
-```
-```{r}
-children_of_interest <- c('HP:0002847', 'HP:0002959', 'HP:0005384', 'HP:0041076', 'HP:0010701')
-plot_phenotypes_of_interest_by_year(terms_of_interest = children_of_interest, df=tested_phenotype_rank_all_by_year)
-```
-
-
-```{r}
-children_of_interest <- c('HP:0010702', 'HP:0032336', 'HP:0410241', 'HP:0410240', 'HP:0410243', 'HP:0410242', 'HP:0410244', 'HP:0004313')
-plot_phenotypes_of_interest_by_year(terms_of_interest = children_of_interest, df=tested_phenotype_rank_all_by_year)
-```
-
-Find what local lab codes are mapped to HP:0010702 Increased circulating antibody level and find which are tested more often after 2017.
-```{r}
-get_tested_phenotype_spike_by_loinc_year <- function(force_rerun=FALSE, cache_dir=CACHE_DIR){
-  df_path = glue('{cache_dir}/tested_phenotype_spike_by_loinc_year.csv')
-  
-  if (force_rerun | !file.exists(df_path)){
-    df <-  dbGetQuery(dsca, "
-              with lab_spike as (
-            	select context_name , lab.loinc , ltp.termid , date_part('Year', lab_date) as lab_year, count(*) as n_record, count(distinct medical_record_number) as n_patient
-            	from hai_az_prod.scc_and_epic_lab_after_loinc2hpo_2020july lab 
-            	join hai_az_prod.loinc_testable_phenotypes ltp on lab.loinc = ltp.loincid 
-            	where ltp.termid = 'HP:0010702'
-            	group by context_name , lab.loinc , ltp.termid, date_part('Year', lab_date)
-            )
-            select l.*
-            from lab_spike l
-            order by context_name , loinc , lab_year;
-              ")
-    
-    write.csv(df, file = df_path, row.names=FALSE)
-  }
-  
-  df <- read.csv(df_path)
-  
-  return (df)
+phenotype_race_prop_test <- function(df){
+  broom::tidy(prop.test(df$observed, p = df$observed/sum(df$dbtotal)))
 }
 
 
-get_tested_phenotype_spike_by_localcode_year <- function(force_rerun=FALSE, cache_dir=CACHE_DIR){
-  df_path = glue('{cache_dir}/tested_phenotype_spike_by_localcode_year.csv')
-  
-  if (force_rerun | !file.exists(df_path)){
-    df <-  dbGetQuery(dsca, "
-              with lab_spike as (
-            	select context_name , local_test_code , ltp.termid, date_part('Year', lab_date) as lab_year, count(*) as n_record, count(distinct medical_record_number) as n_patient
-            	from hai_az_prod.scc_and_epic_lab_after_loinc2hpo_2020july lab 
-            	join hai_az_prod.loinc_testable_phenotypes ltp on lab.loinc = ltp.loincid 
-            	where ltp.termid = 'HP:0010702'
-            	group by context_name , local_test_code ,ltp.termid,  date_part('Year', lab_date)
-            ),
-            local_lab_names as (
-            	select distinct source, code, test_name
-            	from hai_az_prod.loinc_mapping lm 
-            )
-            select l.*, r.test_name
-            from lab_spike l
-            join local_lab_names r on l.local_test_code = r.code
-            order by context_name , local_test_code , lab_year;
-              ")
-    
-    write.csv(df, file = df_path, row.names=FALSE)
-  }
-  
-  df <- read.csv(df_path)
-  
-  return (df)
-}
-
-
-tested_phenotype_spike_by_loinc_year <- get_tested_phenotype_spike_by_loinc_year()
-tested_phenotype_spike_by_localcode_year <- get_tested_phenotype_spike_by_localcode_year()
+tested_phenotype_rank_direct_by_race %>% 
+  select(termid, label, race, n_patient) %>% 
+  rename(observed = n_patient) %>% 
+  group_by(termid, label) %>% 
+  nest() %>% 
+  mutate(data = map(data, function(d) d %>% 
+                      right_join(countByRace, by = 'race') %>%
+                      replace_na(list(termid = first(.$termid), label = first(.$label), observed = 0)))) %>% 
+  mutate(chisq = map(data, phenotype_race_chisq_test)) %>% 
+  select(-data) %>% 
+  unnest(chisq) %>% 
+  arrange(-p.value)
 ```
 
-We can see the spike is caused by LOINC:10834-0 Globulin [Mass/volume] in Serum by calculation. 
-
-The SCC spike is for LOINC:2465-3 IgG [Mass/volume] in Serum or Plasma. The increase is significant, but the raw count is still negligible. 
 ```{r}
-tested_phenotype_spike_by_loinc_year %>% 
-  left_join(tested_patient_count_by_year %>% rename(n_tested = n_patient), by = 'lab_year') %>%
-    filter(lab_year <= 2019 & lab_year > 2000) %>%
-  #filter(loinc == '10834-0') %>%
-    ggplot(aes(x = lab_year, y = n_patient/n_tested, group = loinc, color = loinc)) + 
+tested_phenotype_rank_all_by_race %>% filter(distancetoroot == 1) %>% 
+  select(termid, label, race, n_patient) %>% 
+  rename(observed = n_patient) %>% 
+  group_by(termid, label) %>% 
+  nest() %>% 
+  mutate(data = map(data, function(d) d %>% 
+                      right_join(countByRace, by = 'race') %>%
+                      replace_na(list(termid = first(.$termid), label = first(.$label), observed = 0)))) %>% 
+  mutate(chisq = map(data, phenotype_race_chisq_test)) %>% 
+  select(-data) %>% 
+  unnest(chisq) %>% 
+  arrange(-p.value)
+```
+
+#### racial differences of observed abnormal phenotypes by races
+An improved version of racial analysis: 
+Question: for each race, is it more likely to have a certain abnormal phenotype than the rest of the population?
+
+To do this, we will run Chisq test but on annual basis. 
+```{r}
+tested_patient_count_by_year_race <- tested_patient_count_by_year_race_sex %>% 
+  group_by(lab_year, race) %>% 
+  summarise(dbtotal = sum(n_patient), .groups = 'drop')
+
+tested_patient_count_by_year_race %>% filter(lab_year == 2019)
+```
+
+
+
+```{r}
+RACE_OF_INTEREST <- 'Black or African American'
+df <- phenotype_rank_all_by_year_race_sex %>% 
+  group_by(termid, label, lab_year, race) %>% 
+  summarise(observed = sum(n_patient), .groups = 'drop') %>% 
+  right_join(tested_patient_count_by_year_race, by = c('lab_year', 'race')) %>% 
+  filter(lab_year == 2019) %>% 
+  ##filter(termid == 'HP:0003351')
+  filter(termid == 'HP:0000079') 
+
+
+cm <- df %>%
+  mutate(roi = if_else(race == RACE_OF_INTEREST, 'isROI', 'notROI')) %>% 
+  group_by(roi) %>% 
+  summarise(observed = sum(observed), dbtotal = sum(dbtotal)) %>% 
+  ungroup() %>%
+  mutate(not_observed = dbtotal - observed) %>% 
+  select(-dbtotal) %>%
+  column_to_rownames('roi') %>% 
+  t() %>% 
+  as.matrix()
+
+broom::tidy(fisher.test(cm))
+
+## write a function to test the statistical difference for each race
+racial_abnormality_statistical_test <- function(df){
+  if (nrow(df) <= 1) {
+    return (NULL)
+  }
+  fisher_tests_races <- list()
+  for (RACE_OF_INTEREST in df$race){
+    cm <- df %>%
+        mutate(roi = if_else(race == RACE_OF_INTEREST, 'isROI', 'notROI')) %>% 
+        group_by(roi) %>% 
+        summarise(observed = sum(observed), dbtotal = sum(dbtotal)) %>% 
+        ungroup() %>%
+        mutate(not_observed = dbtotal - observed) %>% 
+        select(-dbtotal) %>%
+        column_to_rownames('roi') %>% 
+        t() %>% 
+        as.matrix()
+    if (length(cm) == 4){
+       fisher_test_coeff <- broom::tidy(fisher.test(cm))
+    } else {
+       fisher_test_coeff <- data.frame(estimate = numeric(), p.value = numeric(), conf.low = numeric(), conf.high = numeric(), method = '', alternative = '')
+    }
+    fisher_test_coeff <- fisher_test_coeff %>% mutate(race = RACE_OF_INTEREST) %>% 
+      select(race, everything())
+    fisher_tests_races[[length(fisher_tests_races) + 1]] <- fisher_test_coeff
+  }
+  fisher_test_coeffs <- bind_rows(fisher_tests_races)
+  ##return (df %>% left_join(fisher_test_coeffs, by = 'race'))
+  return (fisher_test_coeffs)
+}
+
+racial_abnormality_statistical_test(df)
+
+library(furrr)
+
+plan(multisession, workers = 8)
+
+racial_abnormality_fisher <- phenotype_rank_all_by_year_race_sex %>% 
+  group_by(termid, label, lab_year, race) %>% 
+  summarise(observed = sum(n_patient), .groups = 'drop') %>% 
+  right_join(tested_patient_count_by_year_race, by = c('lab_year', 'race')) %>% 
+  #filter(lab_year == 2019) %>% 
+  #filter(termid %in% c('HP:0003351', 'HP:0000079')) %>% 
+  group_by(lab_year, termid, label) %>% 
+  nest() %>% 
+  ungroup() %>% 
+  mutate(fisher_coeff = future_map(data, racial_abnormality_statistical_test)) %>% 
+  select(-data) %>% 
+  unnest(fisher_coeff)
+
+racial_abnormality_fisher %>% nrow()
+
+write.csv(racial_abnormality_fisher, file = glue('{CACHE_DIR}/racial_abnormality_fisher.csv'), row.names = FALSE)
+
+racial_abnormality_fisher %>% filter(between(lab_year, 2000, 2019)) %>% 
+  filter(race == 'Black or African American') %>% 
+  filter(termid %in% hpo_level_1_terms$termid) %>% 
+  {
+    ggplot(., aes(x = lab_year, y = estimate, group = termid, color = termid)) + 
     geom_point() +
     geom_line() +
-    #scale_color_discrete(breaks = loinc, labels = str_c('LOINC', loinc, sep = ":")) +
-    ylab('patient fraction among tested') +
-  facet_wrap(~context_name, nrow = 2, scales = 'free_y')
+    scale_color_discrete(breaks = .$termid, labels = str_c(.$termid, .$label, sep = " ")) +
+    xlab('Year') +
+    ylab('odds ratio') +
+    theme_bw() +
+    theme(panel.grid = element_blank(),
+        axis.title = element_text(size = 8), axis.text = element_text(size = 8), 
+        legend.text = element_text(size = 8), legend.title = element_text(size = 10))
+      
+  }
+  
 ```
-
-Similarly, if we use local codes for the plot, we can also see that EPIC lab test 3277 caused the spike, which has a name of "GLOBULIN". 
-```{r}
-tested_phenotype_spike_by_localcode_year %>% 
-  left_join(tested_patient_count_by_year %>% rename(n_tested = n_patient), by = 'lab_year') %>%
-    filter(lab_year <= 2019 & lab_year > 2000) %>%
-  group_by(context_name, local_test_code) %>%
-  mutate(min_year = min(lab_year), max_year = max(lab_year), max_min_year = max_year - min_year) %>%
-  filter(max_min_year > 2) %>%
-    ggplot(aes(x = lab_year, y = n_patient/n_tested, group = local_test_code, color = local_test_code)) + 
-    geom_point() +
-    geom_line() +
-    #scale_color_discrete(breaks = loinc, labels = str_c('LOINC', loinc, sep = ":")) +
-    ylab('patient fraction among tested') +
-  theme(legend.position = 'bottom') +
-  facet_wrap(~context_name, nrow = 2, scales = 'free_y')
-```
-
 
