@@ -184,7 +184,7 @@ patient_birth_year_sex_distribution <- patient_birth_year_sex_distribution %>%
   filter(birth_year <= 2020) %>%
   mutate(birth_year_bucket = cut(birth_year, breaks = c(1800, seq(1931, 2021, by = 10)), dig.lab = 4)) %>%
   group_by(birth_year_bucket, gender) %>% 
-  summarise(n = sum(n)) %>% 
+  summarise(n = sum(n), .groups = 'drop') %>% 
   arrange(birth_year_bucket)
 
 
@@ -267,7 +267,7 @@ get_loinc2hpo_success_metric <- function(force_rerun=FALSE, cache_dir=CACHE_DIR)
   
 }
 
-loinc2hpo_success_metric <- get_loinc2hpo_success_metric(TRUE)
+loinc2hpo_success_metric <- get_loinc2hpo_success_metric(force_rerun = FORCE_RERUN)
 
 loinc2hpo_success_metric <- loinc2hpo_success_metric %>% mutate(across(function(x) is.numeric(x), function(x) replace_na(x, 0)))
 
@@ -336,7 +336,7 @@ get_hpo_counts_per_patient <- function(force_rerun=FALSE, cache_dir=CACHE_DIR){
   return (df)
 }
 
-hpo_counts_per_patient <- get_hpo_counts_per_patient(TRUE)
+hpo_counts_per_patient <- get_hpo_counts_per_patient(force_rerun = FORCE_RERUN)
 hpo_counts_per_patient <- hpo_counts_per_patient %>% 
   replace_na(list(n_hpo = 0, n_distinct_hpo = 0, n_distinct_abnormal_hpo = 0, n_distinct_abnormal_hpo_infer = 0))
 ```
@@ -964,8 +964,39 @@ get_tested_phenotype_rank_all_by_race <- function(force_rerun=FALSE, cache_dir=C
   return (df)
 }
 
+get_tested_phenotype_rank_all_by_race_year_sex <- function(force_rerun=FALSE, cache_dir=CACHE_DIR){
+  df_path = glue('{cache_dir}/tested_phenotype_rank_all_by_race_year_sex.csv')
+  
+  if (force_rerun | !file.exists(df_path)){
+    df <-  dbGetQuery(dsca, "
+              with testable_phenotypes_direct as (
+              	select lab.medical_record_number , person.race, person.gender , lab.context_name , lab.lab_date , lab.lab_time , date_part(year, lab_date) as lab_year, lab.loinc , testable.termid , testable.is_tested_directly 
+              	from hai_az_prod.scc_and_epic_lab_after_loinc2hpo_2020july lab
+              	join hai_az_prod.loinc_testable_phenotypes testable on lab.loinc = testable.loincid 
+              	join hai_az_prod.person_msdw_2020july person using (medical_record_number)
+              --where testable.is_tested_directly 
+                ),
+                testable_phenotype_direct_freq as (
+                	select termid, lab_year, race, gender, count(*) as n_record, count(distinct medical_record_number) as n_patient
+                	from testable_phenotypes_direct
+                	group by termid, lab_year, race, gender
+                )
+                select testable.*, hpo.label, hpo.distancetoroot
+                from testable_phenotype_direct_freq testable
+                join hai_az_prod.hpo hpo on testable.termid = hpo.termid
+                order by termid, lab_year, race, gender;")
+    
+    write.csv(df, file = df_path, row.names=FALSE)
+  }
+  
+  df <- read.csv(df_path)
+  
+  return (df)
+}
+
 tested_phenotype_rank_direct_by_race <- get_tested_phenotype_rank_direct_by_race(force_rerun = FORCE_RERUN)
 tested_phenotype_rank_all_by_race <- get_tested_phenotype_rank_all_by_race(force_rerun = FORCE_RERUN)
+tested_phenotype_rank_all_by_race_year_sex <- get_tested_phenotype_rank_all_by_race_year_sex(force_rerun = FORCE_RERUN)
 ```
 
 
@@ -997,7 +1028,8 @@ tested_phenotype_rank_direct_by_race %>%
   mutate(chisq = map(data, phenotype_race_chisq_test)) %>% 
   select(-data) %>% 
   unnest(chisq) %>% 
-  arrange(-p.value)
+  arrange(-p.value) %>% 
+  head()
 ```
 
 ```{r}
@@ -1012,7 +1044,8 @@ tested_phenotype_rank_all_by_race %>% filter(distancetoroot == 1) %>%
   mutate(chisq = map(data, phenotype_race_chisq_test)) %>% 
   select(-data) %>% 
   unnest(chisq) %>% 
-  arrange(-p.value)
+  arrange(-p.value) %>% 
+  head()
 ```
 
 #### racial differences of observed abnormal phenotypes by races
@@ -1108,22 +1141,176 @@ racial_abnormality_fisher %>% nrow()
 
 write.csv(racial_abnormality_fisher, file = glue('{CACHE_DIR}/racial_abnormality_fisher.csv'), row.names = FALSE)
 
-racial_abnormality_fisher %>% filter(between(lab_year, 2000, 2019)) %>% 
-  filter(race == 'Black or African American') %>% 
+p <- racial_abnormality_fisher %>% filter(between(lab_year, 2003, 2019)) %>% 
+  #filter(race == 'Black or African American') %>% 
+  #filter(race == 'White') %>%
+  filter(race %in% c('White', 'Black or African American', 'Asian')) %>% 
   filter(termid %in% hpo_level_1_terms$termid) %>% 
   {
     ggplot(., aes(x = lab_year, y = estimate, group = termid, color = termid)) + 
     geom_point() +
     geom_line() +
     scale_color_discrete(breaks = .$termid, labels = str_c(.$termid, .$label, sep = " ")) +
+    #geom_hline(yintercept = c(0.8, 1.2), color = 'red', linetype = 'dotted') +
+    annotate(geom='rect', ymin = 0.8, ymax = 1.2, xmin = -Inf, xmax = Inf, fill = 'magenta', alpha = 0.2) +
+    geom_hline(yintercept = 1, color = 'black') +
     xlab('Year') +
     ylab('odds ratio') +
     theme_bw() +
-    theme(panel.grid = element_blank(),
+    theme(panel.grid = element_blank(), legend.position = 'right',
         axis.title = element_text(size = 8), axis.text = element_text(size = 8), 
-        legend.text = element_text(size = 8), legend.title = element_text(size = 10))
-      
+        legend.text = element_text(size = 8), legend.title = element_text(size = 10)) +
+    facet_wrap(~race, ncol = 1)
+  }
+
+ggsave(filename = glue('{CACHE_DIR}/plot_by_phenotype_racial_difference_over_years.pdf'), plot = p, width = 8, height = 8)
+ 
+p
+```
+
+
+```{r}
+RACE_OF_INTEREST <- 'Black or African American'
+df <- tested_phenotype_rank_all_by_race_year_sex %>% 
+  group_by(termid, label, lab_year, race) %>% 
+  summarise(observed = sum(n_patient), .groups = 'drop') %>% 
+  right_join(tested_patient_count_by_year_race, by = c('lab_year', 'race')) %>% 
+  filter(lab_year == 2019) %>% 
+  ##filter(termid == 'HP:0003351')
+  filter(termid == 'HP:0000079') 
+
+
+cm <- df %>%
+  mutate(roi = if_else(race == RACE_OF_INTEREST, 'isROI', 'notROI')) %>% 
+  group_by(roi) %>% 
+  summarise(observed = sum(observed), dbtotal = sum(dbtotal)) %>% 
+  ungroup() %>%
+  mutate(not_observed = dbtotal - observed) %>% 
+  select(-dbtotal) %>%
+  column_to_rownames('roi') %>% 
+  t() %>% 
+  as.matrix()
+
+broom::tidy(fisher.test(cm))
+
+racial_abnormality_statistical_test(df)
+
+library(furrr)
+
+plan(multisession, workers = 8)
+
+racial_tested_abnormality_fisher <- tested_phenotype_rank_all_by_race_year_sex %>%
+  group_by(termid, label, lab_year, race) %>%
+  summarise(observed = sum(n_patient), .groups = 'drop') %>%
+  right_join(tested_patient_count_by_year_race, by = c('lab_year', 'race')) %>%
+  #filter(lab_year == 2019) %>%
+  #filter(termid %in% c('HP:0003351', 'HP:0000079')) %>%
+  group_by(lab_year, termid, label) %>%
+  nest() %>%
+  ungroup() %>%
+  mutate(fisher_coeff = future_map(data, racial_abnormality_statistical_test)) %>%
+  select(-data) %>%
+  unnest(fisher_coeff)
+
+racial_tested_abnormality_fisher %>% nrow()
+
+write.csv(racial_tested_abnormality_fisher, file = glue('{CACHE_DIR}/racial_tested_abnormality_fisher.csv'), row.names = FALSE)
+
+p <- racial_tested_abnormality_fisher %>% filter(between(lab_year, 2003, 2019)) %>%
+  #filter(race == 'Black or African American') %>%
+  #filter(race == 'White') %>%
+  filter(race %in% c('White', 'Black or African American', 'Asian')) %>%
+  filter(termid %in% hpo_level_1_terms$termid) %>%
+  {
+    ggplot(., aes(x = lab_year, y = estimate, group = termid, color = termid)) +
+    geom_point() +
+    geom_line() +
+    scale_color_discrete(breaks = .$termid, labels = str_c(.$termid, .$label, sep = " ")) +
+    #geom_hline(yintercept = c(0.8, 1.2), color = 'red', linetype = 'dotted') +
+    annotate(geom='rect', ymin = 0.8, ymax = 1.2, xmin = -Inf, xmax = Inf, fill = 'magenta', alpha = 0.2) +
+    geom_hline(yintercept = 1, color = 'black') +
+    xlab('Year') +
+    ylab('odds ratio') +
+    theme_bw() +
+    theme(panel.grid = element_blank(), legend.position = 'right',
+        axis.title = element_text(size = 8), axis.text = element_text(size = 8),
+        legend.text = element_text(size = 8), legend.title = element_text(size = 10)) +
+    facet_wrap(~race, ncol = 1)
+  }
+
+ggsave(filename = glue('{CACHE_DIR}/plot_by_tested_phenotype_racial_difference_over_years.pdf'), plot = p, width = 8, height = 8)
+
+p
+```
+
+For each race, identify the most over-tested phenotypes between 2003 and 2019. 
+```{r}
+overly_tested_abnormalities_by_each_race_top10 <- racial_tested_abnormality_fisher %>% 
+  ## bring in how many patients were tested for each abnormality
+  inner_join(tested_phenotype_rank_all_by_race_year_sex %>% 
+              group_by(termid, lab_year, race) %>% 
+              summarise(n_record = sum(n_record), n_patient = sum(n_patient), .groups = 'drop'), 
+             by = c('termid', 'lab_year', 'race')) %>% 
+  filter(race %in% c('White', 'Black or African American', 'Asian')) %>%
+  ## focus on data between 2003 and 2019
+  filter(between(lab_year, 2003, 2019)) %>% 
+  group_by(termid, label, race) %>% 
+  summarise(median_estimate = median(estimate), 
+            n_record = sum(n_record),
+            n_patient = sum(n_patient),
+            .groups = 'drop') %>% 
+  arrange(desc(median_estimate)) %>%
+  ## do not focus on rarely tested abnormalities
+  ## here we require at least 17 years X 100 patient/year have been tested for the abnormality
+  filter(n_patient > 1700) %>% 
+  ## find top 10 within each race
+  group_by(race) %>% 
+  slice_head(n=10) %>% 
+  ## give some nicer names
+  rename(median_OR = median_estimate,
+         lab_record = n_record,
+         patient_count = n_patient)
+
+write.csv(overly_tested_abnormalities_by_each_race_top10, file=glue('{CACHE_DIR}/overly_tested_abnormalities_by_each_race_top10.csv'), row.names = FALSE)
+
+overly_tested_abnormalities_by_each_race_top10 %>% 
+  ungroup() %>% 
+  #filter(race == 'Asian') %>% 
+  rename(OR = median_OR) %>% 
+  rename(`Lab Record` = lab_record) %>% 
+  rename(`Patient Count` = patient_count) %>% 
+  mutate(OR = round(OR, digits = 3)) %>%
+  group_by(race) %>% 
+  nest() %>% {
+    walk2(.$race, .$data, 
+          function(race_name, df) sjPlot::tab_df(df, 
+                                                 alternate.rows = TRUE, 
+                                                 title = glue("Top 10 Overly Tested Lab Phenotype for {race_name}"), 
+                                                 use.viewer = FALSE, 
+                                                 file = glue('{CACHE_DIR}/table_overly_tested_abnormalities_for_{race_name}_top10.html')))
   }
   
+race_name = 'Asian'
+table_overly_tested_by_race <- function(race_name){
+  df <- overly_tested_abnormalities_by_each_race_top10 %>% 
+    ungroup() %>% 
+    filter(race == race_name) %>% 
+    rename(OR = median_OR) %>% 
+    rename(`Lab Record` = lab_record) %>% 
+    rename(`Patient Count` = patient_count) %>% 
+    mutate(OR = round(OR, digits = 3)) %>%
+    select(-race) 
+
+  sjPlot::tab_df(df, alternate.rows = TRUE, 
+                     title = glue("Top 10 Overly Tested Lab Phenotype for {race_name}: 2003 - 2019"), 
+                 footnote = 'OR: odds of having received lab tests for the phenotype in the race vs other races; <br>
+                phenotypes with less than 1700 tested patients were excluded',
+                 show.footnote = TRUE,
+                     use.viewer = FALSE, 
+                     file = glue('{CACHE_DIR}/table_overly_tested_abnormalities_for_{race_name}_top10.html'))
+}
+table_overly_tested_by_race(race_name = 'Asian')
+table_overly_tested_by_race(race_name = 'Black or African American')
+table_overly_tested_by_race(race_name = 'White')
 ```
 
