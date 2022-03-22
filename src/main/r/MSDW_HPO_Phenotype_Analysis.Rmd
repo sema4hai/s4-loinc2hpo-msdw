@@ -377,6 +377,59 @@ ggsave(filename = glue("{CACHE_DIR}/plotByDistinctAbnormalPhenotypeInferPerPatie
 plot_by_distinct_abnormal_hpo_infer_per_patient
 ```
 
+### Visualize patient phenotypic journey
+```{r}
+get_patient_lab_phenotype_journeys <- function(medical_record_numbers, force_rerun=FALSE, cache_dir=CACHE_DIR) {
+  df_path = glue('{cache_dir}/patient_lab_phenotype_journey.csv')
+  
+  mrns_str <- str_c("'", medical_record_numbers, "'", collapse = ',')
+  
+  if (force_rerun | !file.exists(df_path)){
+    df <- dbGetQuery(dsca, glue("
+            with patient_lab_results as (
+            	select *, date_part(year, lab_date) as lab_year
+            	from hai_az_prod.scc_and_epic_lab_after_loinc2hpo_2020july saelalhj 
+            	where medical_record_number in ({mrns_str}) and hpotermid is not null 
+            ),
+            annual_phenotypes as (
+            	select medical_record_number , lab_year, isnegated , hpotermid , count(*) as n 
+            	from patient_lab_results 
+            	group by medical_record_number , lab_year, isnegated , hpotermid
+            ),
+            annual_phenotypes_annotated as (
+            	select *
+            	from annual_phenotypes p
+            	left join hai_az_prod.hpo h on p.hpotermid  = h.termid  
+            	order by medical_record_number , lab_year, isnegated , hpotermid )
+            select medical_record_number , lab_year, isnegated , hpotermid , n, label
+            from annual_phenotypes_annotated
+            order by medical_record_number , lab_year, isnegated , n desc, hpotermid
+            ;
+            "))
+    
+    write.csv(df, file = df_path, row.names=FALSE)
+  }
+  
+  df <- read.csv(df_path)
+  
+  return (df)
+}
+
+patient_lab_phenotype_journeys <- get_patient_lab_phenotype_journeys(medical_record_numbers = c('7611233'), force_rerun = FORCE_RERUN)
+```
+
+```{r}
+patient_lab_phenotype_journeys_formated <- patient_lab_phenotype_journeys %>% 
+  filter(medical_record_number == '7611233') %>% 
+  select(-medical_record_number) %>% 
+  group_by(lab_year, isnegated) %>% 
+  slice_head(n = 5) %>% 
+  mutate(display = glue('{hpotermid} {label} ({n} times)')) %>% 
+  summarise(display = str_c(display, collapse = '\n'), .groups = 'drop')
+write.csv(patient_lab_phenotype_journeys_formated, file = glue('{CACHE_DIR}/patient_lab_phenotype_journey_formatted.csv'))
+```
+
+
 
 ### Collect patient counts for those with lab data at each year
 

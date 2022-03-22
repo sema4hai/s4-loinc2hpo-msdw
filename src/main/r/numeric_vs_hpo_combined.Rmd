@@ -1,0 +1,68 @@
+---
+title: "numeric vs HPO"
+output: html_notebook
+---
+
+In this page, we combine the analysis of numeric value vs HPO terms for prediction tasks. 
+
+```{r}
+library(tidyverse)
+library(glue)
+```
+
+Load previous data analysis results
+```{r}
+crc_analysis <- read.csv('cache/crc_case_matched_controls_analysis.csv')
+acute_kidney_failure_analysis <- read.csv('cache/acute_kidney_failure_analysis.csv')
+anemia_analysis <- read.csv('cache/anemia_analysis.csv')
+```
+
+```{r}
+numeric_vs_hpo <- bind_rows(crc_analysis %>% mutate(disease = 'colon cancer'), 
+                            acute_kidney_failure_analysis %>% mutate(disease = 'acute kidney failure'), 
+                            anemia_analysis %>% mutate(disease = 'aplastic anemia'))
+
+numeric_vs_hpo %>% sample_n(4)
+
+numeric_vs_hpo_final <- numeric_vs_hpo %>% 
+  select(disease, loinc, estimate1, estimate2, p.value, interpretation, hpotermid) %>% 
+  rename(auc_continuous = estimate1, auc_hpo = estimate2) %>% 
+  group_by(disease, loinc) %>% 
+  arrange(desc(auc_hpo)) %>% 
+  mutate(seq = row_number()) %>% 
+  ungroup() %>% 
+  arrange(disease, loinc, seq) %>% 
+  filter(seq == 1) %>% mutate(frac = auc_hpo/auc_continuous) %>% 
+  mutate(frac_rm_rand = (auc_hpo - 0.5) / (auc_continuous - 0.5))
+
+numeric_vs_hpo_final
+```
+```{r}
+numeric_vs_hpo_final  %>% 
+  #filter(estimate1 > 0.6) %>%
+  summarise(frac_median = median(frac), frac_rm_rand_median = median(frac_rm_rand))
+```
+```{r}
+df <- numeric_vs_hpo_final %>% 
+  select(disease, loinc, auc_continuous, auc_hpo) %>% 
+  pivot_longer(cols = starts_with('auc'), names_to = 'method', names_prefix = 'auc_', values_to = 'auc')
+
+
+plot_AUC_differences_numeric_vs_hpo <- ggplot(df, aes(x = method, y = auc, group = interaction(disease, loinc))) + 
+  geom_point(size = 0.5) +
+  geom_line(aes(color = disease)) +
+  scale_x_discrete(breaks = c('continuous', 'hpo'), labels = c('original numeric value', 'transformed to HPO')) +
+  xlab("Use Lab Test Results As") +
+  ylab("AUC") +
+  theme_bw() + 
+    theme(panel.grid = element_blank(),
+          axis.text = element_text(size = 8),
+          axis.title = element_text(size = 8), 
+          strip.text.x = element_text(margin = margin(0.3, 0, 0.3, 0), size = 5),
+          plot.title = element_text(size = 8))
+
+ggsave(filename = 'cache/plot_AUC_differences_numeric_vs_hpo.pdf', width = 5, height = 3)
+
+plot_AUC_differences_numeric_vs_hpo
+```
+

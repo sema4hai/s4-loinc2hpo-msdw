@@ -31,6 +31,7 @@ CACHE_DIR <- './cache'
 if (!dir.exists(CACHE_DIR)){
   dir.create(CACHE_DIR)
 }
+FORCE_RERUN <- TRUE
 ```
 
 
@@ -45,7 +46,7 @@ n<- dbExecute(dsca, sql)
 Retrieve diagnoses information for the cohort.
 ```{r}
 sql <- "SELECT * FROM cohort"
-df_cohort <- get_df_from_db_or_cache(cache_dir = CACHE_DIR, file_name = 'colorectal_cancer_diagnoses.csv', db_access_callback = dbGetQuery, conn = dsca, statement = sql, force_rerun = FALSE)
+df_cohort <- get_df_from_db_or_cache(cache_dir = CACHE_DIR, file_name = 'colorectal_cancer_diagnoses.csv', db_access_callback = dbGetQuery, conn = dsca, statement = sql, force_rerun = FORCE_RERUN)
 
 df_cohort %>% nrow()
 ```
@@ -54,7 +55,7 @@ df_cohort %>% nrow()
 Retrieve related lab tests for the cohort. 
 ```{r}
 sql <- read_file('../sql/get_labs_for_colorectal_cancer.sql')
-df_labs <- get_df_from_db_or_cache(cache_dir = CACHE_DIR, file_name = "labs_colorectal_cancer.csv", db_access_callback = dbGetQuery, conn=dsca, statement = sql, force_rerun = FALSE)
+df_labs <- get_df_from_db_or_cache(cache_dir = CACHE_DIR, file_name = "labs_colorectal_cancer.csv", db_access_callback = dbGetQuery, conn=dsca, statement = sql, force_rerun = FORCE_RERUN)
 df_labs %>% nrow()
 ```
 
@@ -108,7 +109,7 @@ plot_lab_raw_values_vs_rel_date <- function(lab_loinc, ylim=NULL){
 # p <- arrangeGrob(sapply(plots, function(x) x[[1]]), ncol = 2)
 
 
-p1 <- plot_lab_raw_values_vs_rel_date(lab_loinc = '6690-2', ylim = c(0, 50)) + ggtitle('Leukocytes')
+p1 <- plot_lab_raw_values_vs_rel_date(lab_loinc = '26464-8', ylim = c(0, 50)) + ggtitle('Leukocytes')
 
 p2 <- plot_lab_raw_values_vs_rel_date(lab_loinc = '789-8', ylim = c(0, 10)) + ggtitle('RBC')
 
@@ -283,11 +284,12 @@ pipeline_compare_for_outcome_prediction(df_one_loinc = df_one_loinc)
 
 ```{r max.output=-1, message=FALSE}
 require(furrr)
-plan(multisession, workers = 4)
+plan(multisession, workers = 5)
 
 crc_analysis <- df_labs_and_outcomes %>%
   group_by(loinc) %>%
   nest() %>%
+  ungroup() %>%
   mutate(result = future_map(data, pipeline_compare_for_outcome_prediction)) %>%
   select(-data) %>%
   unnest(result)
@@ -329,16 +331,16 @@ Select the latest labs for the control patients for analysis.
 
 ```{r}
 sql <- read_file('../sql/colorectal_cancer_cohort_demographics.sql')
-df_case_demographics <- get_df_from_db_or_cache(cache_dir = CACHE_DIR, file_name = 'demographics_colorectal_cancer_cases.csv', db_access_callback = dbGetQuery, conn = dsca, statement = sql, force_rerun = FALSE)
+df_case_demographics <- get_df_from_db_or_cache(cache_dir = CACHE_DIR, file_name = 'demographics_colorectal_cancer_cases.csv', db_access_callback = dbGetQuery, conn = dsca, statement = sql, force_rerun = FORCE_RERUN)
 
 sql <- read_file('../sql/colorectal_cancer_control_cohort.sql')
 n<- dbExecute(dsca, sql)
 
 sql <- 'SELECT * FROM control_cohort'
-df_control_demographics <- get_df_from_db_or_cache(cache_dir = CACHE_DIR, file_name = 'demographics_colorectal_cancer_controls.csv', db_access_callback = dbGetQuery, conn = dsca, statement = sql, force_rerun = FALSE)
+df_control_demographics <- get_df_from_db_or_cache(cache_dir = CACHE_DIR, file_name = 'demographics_colorectal_cancer_controls.csv', db_access_callback = dbGetQuery, conn = dsca, statement = sql, force_rerun = FORCE_RERUN)
 
 sql <- read_file('../sql/get_labs_for_colorectal_cancer_control.sql')
-df_control_labs <- get_df_from_db_or_cache(cache_dir = CACHE_DIR, file_name = 'labs_colorectal_cancer_sampled_controls.csv', db_access_callback = dbGetQuery, conn = dsca, statement = sql, force_rerun = FALSE)
+df_control_labs <- get_df_from_db_or_cache(cache_dir = CACHE_DIR, file_name = 'labs_colorectal_cancer_sampled_controls.csv', db_access_callback = dbGetQuery, conn = dsca, statement = sql, force_rerun = FORCE_RERUN)
 ```
 
 ```{r}
@@ -361,6 +363,8 @@ df_labs_and_outcomes_cases <- df_labs %>% filter(!(loinc %in% c('21000-5', '3220
 # labs for controls
 df_labs_and_outcomes_controls <- df_control_labs %>% filter(!(loinc %in% c('21000-5', '32207-3'))) %>%
   as_tibble() %>%
+  mutate(medical_record_number = as.character(medical_record_number)) %>% 
+  mutate(local_test_code = as.character(local_test_code)) %>% 
   #filter(medical_record_number == '7007952')  %>%
   #mutate(lab_date = as.Date(lab_date)) %>%
   arrange(medical_record_number, loinc, desc(lab_date)) %>%
@@ -591,7 +595,13 @@ end_time <- Sys.time()
 
 print(end_time - start_time)
 
+
+crc_case_matched_controls_analysis %>% write.csv(file = 'cache/crc_case_matched_controls_analysis.csv', row.names = FALSE)
+
+
 crc_case_matched_controls_analysis
+
+
 ```
 
 Combine demographics to see whether the AUC can be improved. 
@@ -615,6 +625,7 @@ crc_case_matched_controls_analysis_with_demographics <- df_labs_and_outcomes_cas
   #        race = relevel(race, 'White')) %>%
   group_by(loinc) %>%
   nest() %>%
+  ungroup() %>% 
   mutate(result = future_map(data, pipeline_compare_for_outcome_prediction, include_demographics=TRUE, .options = furrr_options(seed = T))) %>%
   select(-data) %>%
   unnest(result)

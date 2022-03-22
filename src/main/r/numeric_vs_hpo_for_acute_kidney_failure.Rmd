@@ -39,6 +39,7 @@ CACHE_DIR <- './cache'
 if (!dir.exists(CACHE_DIR)){
   dir.create(CACHE_DIR)
 }
+FORCE_RERUN <- TRUE
 ```
 
 
@@ -62,7 +63,7 @@ df_cohort %>% nrow()
 Retrieve liver function lab tests for the cohort. 
 ```{r}
 sql <- read_file('../sql/get_labs_for_acute_kidney_failure.sql')
-df_labs <- get_df_from_db_or_cache(cache_dir = CACHE_DIR, file_name = "labs_acute_kidney_failure.csv", db_access_callback = dbGetQuery, conn=dsca, statement = sql, force_rerun = FALSE)
+df_labs <- get_df_from_db_or_cache(cache_dir = CACHE_DIR, file_name = "labs_acute_kidney_failure.csv", db_access_callback = dbGetQuery, conn=dsca, statement = sql, force_rerun = FORCE_RERUN)
 df_labs %>% nrow()
 ```
 
@@ -274,9 +275,12 @@ plan(multisession, workers = 4)
 kidney_analysis <- df_labs_and_outcomes %>%
   group_by(loinc) %>%
   nest() %>%
+  ungroup() %>% 
   mutate(result = future_map(data, pipeline_compare_for_outcome_prediction)) %>%
   select(-data) %>%
   unnest(result)
+
+write.csv(kidney_analysis, file = 'cache/acute_kidney_failure_analysis.csv', row.names = FALSE)
 
 kidney_analysis
 ```

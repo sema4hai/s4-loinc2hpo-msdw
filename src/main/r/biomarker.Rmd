@@ -249,8 +249,8 @@ fit_model(df_phenotype_feature = d %>% select(-lab_date_rel_bracket, -termid),
                        df_confounders_outcome = confounders_outcome)
 
 ## explore other statistical models
-model2 <- glmer(formula = 'case_or_control ~ gender + race + age + is_observed + (1 + is_observed | is_tested)', data = df_model, family = binomial(link = 'logit') )
-summary(model2)
+# model2 <- glmer(formula = 'case_or_control ~ gender + race + age + is_observed + (1 + is_observed | is_tested)', data = df_model, family = binomial(link = 'logit') )
+# summary(model2)
 ```
 
 Screen all the phenotypes
@@ -258,9 +258,9 @@ Screen all the phenotypes
 ```{r}
 tic <- Sys.time()
 
-plan(multisession, workers = 6)
+plan(multisession, workers = 8)
 
-screen_results2 <- phenotype_features %>% 
+screen_results <- phenotype_features %>% 
   #filter(termid == 'HP:0001880') %>%
   #filter(lab_date_rel_bracket == '(-1,0]') %>%
   group_by(lab_date_rel_bracket, termid) %>%

@@ -31,6 +31,8 @@ CACHE_DIR <- './cache'
 if (!dir.exists(CACHE_DIR)){
   dir.create(CACHE_DIR)
 }
+
+FORCE_RERUN <- TRUE
 ```
 
 
@@ -45,7 +47,7 @@ n<- dbExecute(dsca, sql)
 Retrieve diagnoses information for the cohort.
 ```{r}
 sql <- "SELECT * FROM cohort"
-df_cohort <- get_df_from_db_or_cache(cache_dir = CACHE_DIR, file_name = 'aplastic_anemia_diagnoses.csv', db_access_callback = dbGetQuery, conn = dsca, statement = sql, force_rerun = FALSE)
+df_cohort <- get_df_from_db_or_cache(cache_dir = CACHE_DIR, file_name = 'aplastic_anemia_diagnoses.csv', db_access_callback = dbGetQuery, conn = dsca, statement = sql, force_rerun = FORCE_RERUN)
 
 df_cohort %>% nrow()
 ```
@@ -54,7 +56,7 @@ df_cohort %>% nrow()
 Retrieve related lab tests for the cohort. 
 ```{r}
 sql <- read_file('../sql/get_labs_for_aplastic_anemia.sql')
-df_labs <- get_df_from_db_or_cache(cache_dir = CACHE_DIR, file_name = "labs_aplastic_anemia.csv", db_access_callback = dbGetQuery, conn=dsca, statement = sql, force_rerun = FALSE)
+df_labs <- get_df_from_db_or_cache(cache_dir = CACHE_DIR, file_name = "labs_aplastic_anemia.csv", db_access_callback = dbGetQuery, conn=dsca, statement = sql, force_rerun = FORCE_RERUN)
 df_labs %>% nrow()
 ```
 
@@ -257,9 +259,12 @@ plan(multisession, workers = 4)
 anemia_analysis <- df_labs_and_outcomes %>%
   group_by(loinc) %>%
   nest() %>%
+  ungroup() %>%
   mutate(result = future_map(data, pipeline_compare_for_outcome_prediction)) %>%
   select(-data) %>%
   unnest(result)
+
+write.csv(anemia_analysis, file = 'cache/anemia_analysis.csv', row.names = FALSE)
 
 anemia_analysis
 ```
