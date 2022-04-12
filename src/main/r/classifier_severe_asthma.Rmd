@@ -1,0 +1,132 @@
+---
+title: "classifier_severe_asthma"
+author: "Aaron Zhang"
+date: "3/30/2022"
+output: html_document
+---
+
+The goal of this document is to build ML classifiers to predict progression into severe asthma using biomarkers idenfied from lab phenotype screening.
+
+```{r message=FALSE}
+library(tidyverse)
+library(glue)
+```
+
+## Load data
+```{r}
+CACHE_DIR <- '../cache'
+
+confounders_outcome <- read_csv(glue("{CACHE_DIR}/confounders_outcome.csv"))
+phenotype_features <- read_csv(glue("{CACHE_DIR}/phenotype_features.csv"))
+```
+
+## Prepare feature matrix
+
+We will use the biomarker in the past year, and the count in the past three
+```{r}
+biomarkers_identified <- c("HP:0001880", "HP:0001899", "HP:0012312", 
+                           "HP:0032309", "HP:0011897", "HP:0012416")
+
+# biomarkers from Year (-1, 0] only
+biomarker_feature_matrix <- phenotype_features %>% filter(termid %in% biomarkers_identified) %>% 
+  mutate(termid = make.names(termid)) %>% 
+  rename(tested = tested_count) %>% 
+  rename(observed = observed_count) %>% 
+  select(medical_record_number, lab_date_rel_bracket, termid, tested, observed) %>% 
+  #filter(lab_date_rel_bracket == '(-1,0]') %>% 
+  pivot_wider(id_cols = medical_record_number, names_from = c(lab_date_rel_bracket, termid), values_from = c(tested, observed)) 
+  
+Xy <- confounders_outcome %>% 
+  left_join(biomarker_feature_matrix, by = 'medical_record_number') %>% 
+  mutate(across(starts_with('tested'), ~ replace_na(.x, 0))) %>% 
+  mutate(across(starts_with('observed'), ~ replace_na(.x, 0))) %>% 
+  mutate(gender = as_factor(gender)) %>%
+  mutate(gender = fct_relevel(gender, 'Male')) %>% 
+  mutate(race = as_factor(race)) %>% 
+  mutate(race = fct_relevel(race, 'White')) %>% 
+  mutate(age = round(age / 10, 0) * 10) %>% 
+  relocate(case_or_control, .after = last_col())
+```
+
+```{r message=FALSE}
+library(caret)
+require(doSNOW)
+require(pROC)
+```
+
+```{r}
+set.seed(7531)
+
+# how to balance classes
+class_balance_method <- c('downsample' = TRUE, 'upsample' = FALSE, 'asis' = FALSE)
+stopifnot(sum(class_balance_method) == 1)
+if (class_balance_method['downsample']){
+  Xy <- downSample(Xy %>% select(-case_or_control), factor(Xy$case_or_control), yname='case_or_control')
+} else if (class_balance_method['upsample']){
+  Xy <- upSample(Xy %>% select(-case_or_control), factor(Xy$case_or_control), yname='case_or_control')
+} else {
+  # do nothing
+}
+```
+
+
+```{r}
+trainIndex <- createDataPartition(Xy$case_or_control, p = 0.80, list = FALSE)
+
+df_ml_train <- Xy[trainIndex, ]
+df_ml_test <- Xy[-trainIndex, ]
+```
+
+```{r}
+# train a random forest, start with default
+control <- trainControl(method='repeatedcv', 
+                        number=5, 
+                        repeats=3,
+                        classProbs = TRUE)
+mtry <- sqrt(ncol(df_ml_train))
+tunegrid <- expand.grid(.mtry=mtry)
+
+c1 <- makeCluster(6, type = "SOCK")
+registerDoSNOW(c1)
+rf_default <- train(case_or_control ~ ., 
+                    data = df_ml_train %>% select(-medical_record_number) %>% mutate(case_or_control = factor(case_or_control)),
+                    method = 'rf', 
+                    metric = 'Kappa', 
+                    truneGrid = tunegrid,
+                    trControl = control)
+stopCluster(c1)
+
+importance <- varImp(rf_default)
+
+feature_rank_rf <- as.data.frame(importance$importance) %>% rownames_to_column(var = 'feature') %>% arrange(-Overall)
+
+prediction <- predict(rf_default, df_ml_test %>% select(-medical_record_number, -case_or_control))
+
+confusionMatrix(prediction, factor(df_ml_test$case_or_control), positive = 'case')
+```
+
+
+
+
+```{r}
+# use a boosting algorithm
+c1 <- makeCluster(6, type = "SOCK")
+registerDoSNOW(c1)
+xgbGrid <- expand.grid(nrounds = c(30, 60, 90),
+                       max_depth = c(10, 15, 20, 25),
+                       colsample_bytree = seq(0.5, 0.9, length.out = 5),
+                       eta = c(0.1, 0.2, 0.4),
+                       gamma=0,
+                       min_child_weight = 1,
+                       subsample = c(0.5, 0.75)
+                      )
+xgboost_model <- train(case_or_control ~ ., 
+                    data = df_ml_train %>% select(-medical_record_number) %>% mutate(case_or_control = factor(case_or_control)),
+                    method = 'xgbTree', 
+                    tuneGrid = xgbGrid,
+                    trControl = control)
+stopCluster(c1)
+prediction <- predict(xgboost_model, df_ml_test %>% select(-medical_record_number, -case_or_control))
+
+confusionMatrix(prediction, factor(df_ml_test$case_or_control), positive = 'case')
+```

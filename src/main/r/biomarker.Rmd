@@ -240,7 +240,7 @@ glm_Xy(df_model) %>% filter(str_starts(term, 'is_testedTRUE'))
 fit_model <- function(df_phenotype_feature, df_confounders_outcome) {
   df_model <- prepare_Xy(df_phenotype_feature, df_confounders_outcome)
   model_coeff <- data.frame(term = character(), estimate = double(), std.error = double(), statistic = double(), p.value = double())
-  tryCatch({model_coeff = glm_Xy(df_model)}, error = function(e) print('cannot fit model'))
+  tryCatch({model_coeff = glm_Xy(df_model)}, error = function(e) warning('cannot fit model'))
   #error = function(e) print('model did not run'))
   return (model_coeff)
 }
@@ -278,6 +278,7 @@ toc - tic
 ```{r}
 ## how many biomarkers we have screened
 ## at each time window
+N_BIOMARKERS_SCREENED <- screen_results %>% select(lab_date_rel_bracket, termid) %>% distinct() %>% nrow()
 screen_results %>% group_by(lab_date_rel_bracket) %>% summarise(n = n_distinct(termid))
 ```
 
@@ -288,73 +289,96 @@ hpo_term_list <- read.csv('/Users/xingminzhang/git/s4-pd-dmsdw/pd-dmsdw-loinc2hp
 
 screen_results_annotated <- screen_results %>%  filter(str_starts(term, 'is_testedTRUE')) %>% arrange(lab_date_rel_bracket) %>%
   left_join(hpo_term_list, by = 'termid') %>%
-  select(lab_date_rel_bracket, termid, label, term, estimate, std.error, statistic, p.value) 
+  select(lab_date_rel_bracket, termid, label, distance_to_root, term, distance_to_root, estimate, std.error, statistic, p.value) 
 
 write.csv(screen_results_annotated, file = '../cache/screen_results_annotated.csv', row.names = FALSE)
 
 screen_results_annotated %>% head()
 ```
 
+
 ```{r}
-# rank results by weight of is_tested
-screen_results_annotated %>% group_by(lab_date_rel_bracket, termid) %>%
-  arrange(term) %>%
-  mutate(term_rank = row_number()) %>%
-  ungroup() %>% 
-  arrange(lab_date_rel_bracket, termid) %>% 
-  group_by(lab_date_rel_bracket, termid, label) %>%
-  nest() %>% 
-  mutate(ranking_metric_value = map_dbl(data, function(df) df$estimate[df$term == 'is_testedTRUE'])) %>% 
-  arrange(-ranking_metric_value) %>% 
-  mutate(overall_rank = row_number()) %>%
-  unnest(cols = c(data)) %>%
-  write.csv(file = '../cache/screen_results_annotated_rank_by_weight_of_is_tested.csv', row.names = FALSE)
-  
-# rank results by weight of is_testedTRUE:is_observedTRUE
-screen_results_annotated %>% group_by(lab_date_rel_bracket, termid) %>%
-  arrange(term) %>%
-  mutate(term_rank = row_number()) %>%
-  ungroup() %>% 
-  arrange(lab_date_rel_bracket, termid) %>% 
-  group_by(lab_date_rel_bracket, termid, label) %>%
-  nest() %>% 
-  mutate(ranking_metric_value = map_dbl(data, function(df) df$estimate[df$term == 'is_testedTRUE:is_observedTRUE'])) %>% 
-  arrange(-ranking_metric_value) %>% 
-  mutate(overall_rank = row_number()) %>%
-  unnest(cols = c(data)) %>%
-  write.csv(file = '../cache/screen_results_annotated_rank_by_weight_of_is_tested_is_observed.csv', row.names = FALSE)
+screen_results_annotated_formatted <- screen_results_annotated %>% 
+  mutate(OR = exp(estimate)) %>% 
+  mutate(OR = round(OR, 2)) %>% 
+  #mutate(p.value = scales::scientific(p.value, digits = 3)) %>% 
+  select(-estimate, -std.error, -statistic) %>% 
+  mutate(term = case_when(term == 'is_testedTRUE' ~ 'tested',
+                          term == 'is_testedTRUE:is_observedTRUE' ~ 'observed',
+                          TRUE ~ 'NEVER GONNA HAPPEN')) %>% 
+  pivot_wider(id_cols = c(lab_date_rel_bracket, termid, label, distance_to_root), names_from = term, values_from = c(OR, p.value)) %>% 
+  relocate(p.value_tested, .after = 'OR_tested') %>% 
+  rename(`Odds Ratio (Been Tested)` = OR_tested) %>% 
+  rename(`p value (Been Tested)` = p.value_tested) %>% 
+  rename(`Odds Ratio (Been Observed)` = 'OR_observed') %>% 
+  rename(`p value (Been Observed)` = 'p.value_observed')
 
+write.csv(screen_results_annotated_formatted, file = '../cache/screen_results_annotated.csv', row.names = FALSE)
 
-# rank results by p value of is_tested
-screen_results_annotated %>% group_by(lab_date_rel_bracket, termid) %>%
-  arrange(term) %>%
-  mutate(term_rank = row_number()) %>%
-  ungroup() %>% 
-  arrange(lab_date_rel_bracket, termid) %>% 
-  group_by(lab_date_rel_bracket, termid, label) %>%
-  nest() %>% 
-  mutate(ranking_metric_value = map_dbl(data, function(df) df$p.value[df$term == 'is_testedTRUE'])) %>% 
-  arrange(ranking_metric_value) %>% 
-  mutate(overall_rank = row_number()) %>%
-  unnest(cols = c(data)) %>%
-  write.csv(file = '../cache/screen_results_annotated_rank_by_p_of_is_tested.csv', row.names = FALSE)
-
-# rank results by p value of is_testedTRUE:is_observedTRUE
-screen_results_annotated %>% group_by(lab_date_rel_bracket, termid) %>%
-  arrange(term) %>%
-  mutate(term_rank = row_number()) %>%
-  ungroup() %>% 
-  arrange(lab_date_rel_bracket, termid) %>% 
-  group_by(lab_date_rel_bracket, termid, label) %>%
-  nest() %>% 
-  mutate(ranking_metric_value = map_dbl(data, function(df) df$p.value[df$term == 'is_testedTRUE:is_observedTRUE'])) %>% 
-  arrange(ranking_metric_value) %>% 
-  mutate(overall_rank = row_number()) %>%
-  unnest(cols = c(data)) %>%
-  write.csv(file = '../cache/screen_results_annotated_rank_by_p_of_is_tested_is_observed.csv', row.names = FALSE)
+screen_results_annotated_formatted %>% head()
 ```
 
+Highlight some biomarkers:
 
+Eosinophilia
+```{r}
+eosinophilia <- screen_results_annotated_formatted %>% 
+  filter(label == 'Eosinophilia') %>% 
+  select(-distance_to_root) %>% 
+  mutate(across(starts_with('p value'), scales::scientific))
+
+sjPlot::tab_df(eosinophilia %>% rename(`Lab Year Bracket` = lab_date_rel_bracket), 
+                title = 'Table Association of Eosinophilia with Severe Asthma',
+               file = '../cache/table_eosinophilia_with_severe_asthma.html',
+               alternate.rows = TRUE)
+
+eosinophilia
+```
+
+Rank by Odds Ratio (Been Observed)
+```{r}
+significant_by_tested_and_observed <- screen_results_annotated_formatted %>% 
+  arrange(desc(`Odds Ratio (Been Observed)`)) %>% 
+  filter(`p value (Been Tested)` < 0.05/N_BIOMARKERS_SCREENED) %>%
+  filter(`p value (Been Observed)` < 0.05/N_BIOMARKERS_SCREENED) %>%
+  filter(`Odds Ratio (Been Tested)` > 1) %>% 
+  filter(`Odds Ratio (Been Observed)` > 1) %>% 
+  filter(lab_date_rel_bracket == '(-1,0]') %>%
+  mutate(across(starts_with('p value'), scales::scientific)) 
+
+significant_by_tested_and_observed_deduped <- significant_by_tested_and_observed %>% 
+  rows_delete(tibble(label = c('Abnormal eosinophil morphology', 
+                               'Abnormal leukocyte morphology',
+                               'Abnormal immune system morphology',
+                               'Abnormal cellular immune system morphology',
+                               'Abnormal leukocyte count',
+                               'Abnormal granulocyte morphology',
+                               'Abnormality of the respiratory system',
+                               'Functional respiratory abnormality')), by = 'label')
+
+significant_by_tested_and_observed_deduped
+```
+```{r}
+significant_by_tested_and_observed_deduped_three_years <- screen_results_annotated_formatted %>% 
+  filter(termid %in% significant_by_tested_and_observed_deduped$termid) %>% 
+  mutate(termid = factor(termid, levels = significant_by_tested_and_observed_deduped$termid)) %>% 
+  arrange(termid, lab_date_rel_bracket) %>%
+  mutate(across(starts_with('p value'), scales::scientific)) 
+
+significant_by_tested_and_observed_deduped_three_years
+```
+
+```{r}
+sjPlot::tab_df(significant_by_tested_and_observed_deduped %>% select(-distance_to_root, -lab_date_rel_bracket), 
+                title = 'Table Selected Phenotypes (within 1 year prior) Associated with Severe Asthma',
+               file = '../cache/table_selected_biomarker_from_labs_within_1_year_prior_to_dx.html', 
+               alternate.rows = TRUE)
+sjPlot::tab_df(significant_by_tested_and_observed_deduped_three_years %>% 
+                 select(-distance_to_root) %>% rename(`Lab Year Bracket` = lab_date_rel_bracket), 
+                title = 'Table Selected Phenotypes (within past 3 years) Associated with Severe Asthma',
+               file = '../cache/table_selected_biomarker_from_labs_within_3_years_prior_to_dx.html',
+               alternate.rows = TRUE)
+```
 
 
 ## Cache data for future use

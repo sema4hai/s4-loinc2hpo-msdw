@@ -2,7 +2,7 @@ create temp table control_cohort as
 with patients_having_blood_work as (
 	select medical_record_number
 	from hai_az_prod.scc_and_epic_lab_after_loinc2hpo_2020july lab 
-	where lab.loinc = '6690-2'
+	where lab.loinc = '26464-8'
 	intersect 
 	select medical_record_number
 	from hai_az_prod.scc_and_epic_lab_after_loinc2hpo_2020july lab 

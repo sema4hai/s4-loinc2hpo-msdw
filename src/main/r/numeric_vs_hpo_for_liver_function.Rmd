@@ -35,6 +35,7 @@ CACHE_DIR <- './cache'
 if (!dir.exists(CACHE_DIR)){
   dir.create(CACHE_DIR)
 }
+FORCE_RERUN <- FALSE
 ```
 
 
@@ -49,7 +50,7 @@ n<- dbExecute(dsca, sql)
 Retrieve liver function diagnoses information for the cohort.
 ```{r}
 sql <- "SELECT * FROM cohort"
-df_cohort <- get_df_from_db_or_cache(cache_dir = CACHE_DIR, file_name = 'liver_diagnoses.csv', db_access_callback = dbGetQuery, conn = dsca, statement = sql, force_rerun = FALSE)
+df_cohort <- get_df_from_db_or_cache(cache_dir = CACHE_DIR, file_name = 'liver_diagnoses.csv', db_access_callback = dbGetQuery, conn = dsca, statement = sql, force_rerun = FORCE_RERUN)
 
 df_cohort %>% nrow()
 ```
@@ -58,7 +59,7 @@ df_cohort %>% nrow()
 Retrieve liver function lab tests for the cohort. 
 ```{r}
 sql <- read_file('../sql/get_labs_for_liver_function.sql')
-df_liver_labs <- get_df_from_db_or_cache(cache_dir = CACHE_DIR, file_name = "labs_liver_function.csv", db_access_callback = dbGetQuery, conn=dsca, statement = sql, force_rerun = FALSE)
+df_liver_labs <- get_df_from_db_or_cache(cache_dir = CACHE_DIR, file_name = "labs_liver_function.csv", db_access_callback = dbGetQuery, conn=dsca, statement = sql, force_rerun = FORCE_RERUN)
 df_liver_labs %>% nrow()
 ```
 
@@ -284,14 +285,17 @@ pipeline_compare_for_liver_function(df_one_loinc = df_one_loinc)
 
 ```{r}
 require(furrr)
-plan(multisession, workers = 4)
+plan(multisession, workers = 6)
 
 liver_analysis <- df_liver_labs_and_outcomes %>%
   group_by(loinc) %>%
   nest() %>%
+  ungroup() %>% 
   mutate(result = future_map(data, pipeline_compare_for_liver_function)) %>%
   select(-data) %>%
   unnest(result)
+
+write.csv(liver_analysis, file = 'cache/liver_analysis.csv', row.names = FALSE)
 
 liver_analysis
 ```
@@ -309,8 +313,7 @@ df_test <- df_train_test$df_test
   
 lr_H <- lr_for_hpo_H(df_train = df_train, df_test = df_test)
 roc_comparison <- compare_rocs(lr_H[[5]], lr_H[[6]])
-roc_comparison <- bind_cols(roc_comparison, valid_lab_outcomes %>% filter(interpretation == 'H'))
-roc_comparisons$H <- roc_comparison
+
 
 plot(lr_H[[5]])
 plot(lr_H[[6]])
