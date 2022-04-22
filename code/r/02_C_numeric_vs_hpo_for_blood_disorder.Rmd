@@ -21,18 +21,23 @@ require(DBI)
 require(RPostgres)
 require(egg)
 require(gridExtra)
-source('.db_credential.R')
 source('functions.R')
-dsca <- DBI::dbConnect(RPostgres::Postgres(), host='localhost', user=user, dbname = dbname, port = 2345, password=password)
+dsca <- DBI::dbConnect(RPostgres::Postgres(), 
+                       host=Sys.getenv('DSCA_PHI_HOST'), 
+                       dbname = Sys.getenv('DSCA_PHI_DBNAME'), 
+                       port = Sys.getenv('DSCA_PHI_PORT'), 
+                       user=Sys.getenv('DSCA_PHI_USERNAME'),
+                       password= Sys.getenv('DSCA_PHI_PASSWORD'))
 
 
 # cache directory to read from or write to
-CACHE_DIR <- './cache'
+CACHE_DIR = '../../cache'
+
 if (!dir.exists(CACHE_DIR)){
   dir.create(CACHE_DIR)
 }
 
-FORCE_RERUN <- TRUE
+FORCE_RERUN <- FALSE
 ```
 
 
