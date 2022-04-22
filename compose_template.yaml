@@ -10,9 +10,9 @@ services:
       # mount current repo to a Docker folder under the home user directory (default is rstudio)
       # refer to repo files with relative path
       - .:/home/rstudio/s4-loinc2hpo-msdw
-      # mount Biopharma_Shared_Workspace to a Docker folder under root directory
+      # mount Biopharma_Shared_Workspace on SharePoint HAI to a Docker folder under root directory
       # make sure you have access to the shared workspace if using OneDrive
-      # make sure you have no spaces in your path (if you do, create a symbolic link. see readme for details)
+      # make sure you have no spaces in your path (if you do, create a symbolic link.)
       - { PATH TO YOUR ONEDRIVE/SharePoint }/Biopharma_Shared_Workspace:/Biopharma_Shared_Workspace
     environment:
       # disable authentication

@@ -25,13 +25,17 @@ require(DBI)
 require(RPostgres)
 require(egg)
 require(gridExtra)
-source('.db_credential.R')
 source('functions.R')
-dsca <- DBI::dbConnect(RPostgres::Postgres(), host='localhost', user=user, dbname = dbname, port = 2345, password=password)
+dsca <- DBI::dbConnect(RPostgres::Postgres(), 
+                       host=Sys.getenv('DSCA_PHI_HOST'), 
+                       dbname = Sys.getenv('DSCA_PHI_DBNAME'), 
+                       port = Sys.getenv('DSCA_PHI_PORT'), 
+                       user=Sys.getenv('DSCA_PHI_USERNAME'),
+                       password= Sys.getenv('DSCA_PHI_PASSWORD'))
 
 
 # cache directory to read from or write to
-CACHE_DIR <- './cache'
+CACHE_DIR = '../../cache'
 if (!dir.exists(CACHE_DIR)){
   dir.create(CACHE_DIR)
 }
@@ -141,10 +145,10 @@ p9 <- plot_liver_lab_raw_values_vs_rel_date(lab_loinc = '1968-7', ylim = c(0, 15
 
 p <- gridExtra::arrangeGrob(p1, p2, p3, p4, p5, p6, p7, p8, p9, ncol = 3)
 
-ggsave(filename = 'cache/liver_labs_raw_data_distribution_by_rel_date.png', plot = p, width = 6, height = 6)
+ggsave(filename = glue('{CACHE_DIR}/liver_labs_raw_data_distribution_by_rel_date.png', plot = p, width = 6, height = 6))
 ```
 
-![liver function labs](./cache/liver_labs_raw_data_distribution_by_rel_date.png)
+![liver function labs](./../../cache/liver_labs_raw_data_distribution_by_rel_date.png)
 
 
 
@@ -295,7 +299,7 @@ liver_analysis <- df_liver_labs_and_outcomes %>%
   select(-data) %>%
   unnest(result)
 
-write.csv(liver_analysis, file = 'cache/liver_analysis.csv', row.names = FALSE)
+write.csv(liver_analysis, file = glue('{CACHE_DIR}/liver_analysis.csv'), row.names = FALSE)
 
 liver_analysis
 ```

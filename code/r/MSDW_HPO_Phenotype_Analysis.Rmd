@@ -15,15 +15,19 @@ require(DBI)
 require(RPostgres)
 require(egg)
 require(gridExtra)
-source('.db_credential.R')
-dsca <- DBI::dbConnect(RPostgres::Postgres(), host='localhost', user=user, dbname = dbname, port = 2345, password=password)
+dsca <- DBI::dbConnect(RPostgres::Postgres(), 
+                       host=Sys.getenv('DSCA_PHI_HOST'), 
+                       dbname = Sys.getenv('DSCA_PHI_DBNAME'), 
+                       port = Sys.getenv('DSCA_PHI_PORT'), 
+                       user=Sys.getenv('DSCA_PHI_USERNAME'),
+                       password= Sys.getenv('DSCA_PHI_PASSWORD'))
 ```
 
 
 ## ANALYSIS
 
 ```{r}
-CACHE_DIR = 'cache'
+CACHE_DIR = '../../cache'
 if (!dir.exists(CACHE_DIR)){
   dir.create(CACHE_DIR)
 }
@@ -39,6 +43,8 @@ get_db_data <- function(sql, df_path, force_rerun=FALSE, cache_dir=CACHE_DIR){
   return (df)
 }
 
+# if true, ignore cached data and reconnect to database to get latest data;
+# otherwise, use cached data first before trying to connect to database
 FORCE_RERUN <- FALSE
 ```
 
@@ -78,7 +84,7 @@ get_patient_race_sex_distribution <- function(force_rerun=FALSE, cache_dir=CACHE
   
 }
 
-patient_race_sex_distribution <- get_patient_race_sex_distribution(force_rerun = FALSE)
+patient_race_sex_distribution <- get_patient_race_sex_distribution(force_rerun = FORCE_RERUN)
 
 
 # recode all unknown gender as one category
@@ -741,7 +747,7 @@ tested_phenotype_rank_all <- get_tested_phenotype_rank_all(force_rerun = FORCE_R
 
 For the directly tested phenotypes, we can observe what are the most tested abnormalities in one healthcare system. 
 ```{r}
-tested_phenotype_rank_direct %>% head(10) %>% formattable::formattable()
+tested_phenotype_rank_direct %>% head(10)
 ```
 
 
