@@ -1,17 +1,13 @@
 ---
 title: "R Notebook"
-output:
-  html_document:
-    df_print: paged
+output: html_notebook
 ---
 
 ## Goal
-Compare the performance of raw lab values vs HPO interpretations for acute kidney failure.
-
-The analysis process is very similar to the liver function analysis.
+Compare the performance of raw lab values vs HPO interpretations for liver function prediction.
 
 Algorithm:
-- Define a cohort of patients coded with acute kidney failure as the primay diagnosis of a visit;
+- Define a cohort of patients coded with abnormal liver function, and the earliest date of diagnosis;
 - Get all the lab tests with selected LOINC code; 
 - For each patient, the labs within X days (e.g. 7 days) before the diagnosis date is considered to be associated with + outcome; and the labs further outside of the window is considered to be associated with - outcome; 
 - For each LOINC code, we will prepare a dataframe, separate into training and test set, train a logistic regression classifier using either raw numerical value or HPO value (observed or not observed), build the ROC curve with the test set, and finally compare the ROC curve to determine whether they are statistically different. 
@@ -29,23 +25,27 @@ require(DBI)
 require(RPostgres)
 require(egg)
 require(gridExtra)
-source('.db_credential.R')
 source('functions.R')
-dsca <- DBI::dbConnect(RPostgres::Postgres(), host='localhost', user=user, dbname = dbname, port = 2345, password=password)
+dsca <- DBI::dbConnect(RPostgres::Postgres(), 
+                       host=Sys.getenv('DSCA_PHI_HOST'), 
+                       dbname = Sys.getenv('DSCA_PHI_DBNAME'), 
+                       port = Sys.getenv('DSCA_PHI_PORT'), 
+                       user=Sys.getenv('DSCA_PHI_USERNAME'),
+                       password= Sys.getenv('DSCA_PHI_PASSWORD'))
 
 
 # cache directory to read from or write to
-CACHE_DIR <- './cache'
+CACHE_DIR = '../../cache'
 if (!dir.exists(CACHE_DIR)){
   dir.create(CACHE_DIR)
 }
-FORCE_RERUN <- TRUE
+FORCE_RERUN <- FALSE
 ```
 
 
 Create a cohort for patients with abnormal liver function diagnoses.
 ```{r}
-sql <- read_file('../sql/acute_kidney_failure_cohort.sql')
+sql <- read_file('../sql/liver_abnormal_function_cohort.sql')
 print(sql)
 n<- dbExecute(dsca, sql)
 ```
@@ -54,7 +54,7 @@ n<- dbExecute(dsca, sql)
 Retrieve liver function diagnoses information for the cohort.
 ```{r}
 sql <- "SELECT * FROM cohort"
-df_cohort <- get_df_from_db_or_cache(cache_dir = CACHE_DIR, file_name = 'acute_kidney_failure_diagnoses.csv', db_access_callback = dbGetQuery, conn = dsca, statement = sql, force_rerun = FALSE)
+df_cohort <- get_df_from_db_or_cache(cache_dir = CACHE_DIR, file_name = 'liver_diagnoses.csv', db_access_callback = dbGetQuery, conn = dsca, statement = sql, force_rerun = FORCE_RERUN)
 
 df_cohort %>% nrow()
 ```
@@ -62,15 +62,15 @@ df_cohort %>% nrow()
 
 Retrieve liver function lab tests for the cohort. 
 ```{r}
-sql <- read_file('../sql/get_labs_for_acute_kidney_failure.sql')
-df_labs <- get_df_from_db_or_cache(cache_dir = CACHE_DIR, file_name = "labs_acute_kidney_failure.csv", db_access_callback = dbGetQuery, conn=dsca, statement = sql, force_rerun = FORCE_RERUN)
-df_labs %>% nrow()
+sql <- read_file('../sql/get_labs_for_liver_function.sql')
+df_liver_labs <- get_df_from_db_or_cache(cache_dir = CACHE_DIR, file_name = "labs_liver_function.csv", db_access_callback = dbGetQuery, conn=dsca, statement = sql, force_rerun = FORCE_RERUN)
+df_liver_labs %>% nrow()
 ```
 
 The first thing is to check how do the raw values of lab test look like before diagnoses of abnormal liver function. We want to choose a time window during which the liver function labs are highly correlated with the diagnosis, and another time window well, which is before the first window and corresponds to a *normal* liver function labs. The plot below shows that roughly we can choose -180 as the time cutoff: within this time cutoff, i.e. (-180, 0) days, the latest lab test tends to be abnormal and correspond to an abnormal liver function diagnosis; outside of this time cutoff, i.e. 180 days before a known liver abnormal function diagnosis, the lab test tends to be normal.  
 ```{r}
-plot_lab_raw_values_vs_rel_date <- function(lab_loinc, ylim=NULL){
-  df <- df_labs %>% 
+plot_liver_lab_raw_values_vs_rel_date <- function(lab_loinc, ylim=NULL){
+  df <- df_liver_labs %>% 
     filter(loinc == lab_loinc) %>% 
     filter(rel_date <= 0 & rel_date > -730) %>% 
     mutate(lab_result_numeric_value = as.numeric(lab_result_numeric_value))
@@ -113,34 +113,53 @@ plot_lab_raw_values_vs_rel_date <- function(lab_loinc, ylim=NULL){
 #                 liver_lab_total_bulirubin, 
 #                 liver_lab_direct_bulirubin)
 # 
-# plots <- map(liver_labs, function(x) plot_lab_raw_values_vs_rel_date(lab_loinc = x@lab_loinc, ylim = c(x@ylim_min, x@ylim_max)))
+# plots <- map(liver_labs, function(x) plot_liver_lab_raw_values_vs_rel_date(lab_loinc = x@lab_loinc, ylim = c(x@ylim_min, x@ylim_max)))
 # p <- arrangeGrob(sapply(plots, function(x) x[[1]]), ncol = 2)
 
+## LOINC 1742-6 Alanine aminotransferase
+p1 <- plot_liver_lab_raw_values_vs_rel_date(lab_loinc = '1742-6', ylim = c(0, 500)) + ggtitle('Alanine aminotransferase')
 
-p1 <- plot_lab_raw_values_vs_rel_date(lab_loinc = '2160-0', ylim = c(0, 20)) + ggtitle('Serum creatinine')
+## LOINC 2324-2 Gamma glutamyl transferase
+p2 <- plot_liver_lab_raw_values_vs_rel_date(lab_loinc = '2324-2', ylim = c(0, 1000)) + ggtitle('Gamma glutamyl transferase')
 
-p2 <- plot_lab_raw_values_vs_rel_date(lab_loinc = '3094-0', ylim = c(0, 150)) + ggtitle('Urea nitrogen in serum')
+## LOINC 1920-8 Aspartate aminotransferase
+p3 <- plot_liver_lab_raw_values_vs_rel_date(lab_loinc = '1920-8', ylim = c(0, 500)) + ggtitle('Aspartate aminotransferase')
 
-p3 <- plot_lab_raw_values_vs_rel_date(lab_loinc = '6299-2', ylim = c(0, 200)) + ggtitle('Urea nitrogen in blood')
+## LOINC 6768-6 Alkaline phosphatase
+p4 <- plot_liver_lab_raw_values_vs_rel_date(lab_loinc = '6768-6', ylim = c(0, 1000)) + ggtitle('Alkaline phosphatase')
 
-p4 <- plot_lab_raw_values_vs_rel_date(lab_loinc = '2823-3', ylim = c(0, 10)) + ggtitle('Potassium in serum')
+## LOINC 2885-2 total protein: if low, maybe reflecting liver or kidney problem
+p5 <- plot_liver_lab_raw_values_vs_rel_date(lab_loinc = '2885-2', ylim = c(0, 15)) + ggtitle('Total protein')
 
-# seems the test strip only reports positive or negative outcomes
-p5 <- plot_lab_raw_values_vs_rel_date(lab_loinc = '5804-0', ylim = c(0, 500)) + ggtitle('protein in urine')
+## LOINC 1751-7 serum albumin
+p6 <- plot_liver_lab_raw_values_vs_rel_date(lab_loinc = '1751-7', ylim = c(0, 7.5)) + ggtitle('Serum albumin')
 
-# very sparse data
-p6 <- plot_lab_raw_values_vs_rel_date(lab_loinc = '2889-4', ylim = c(0, 200)) + ggtitle('Protein in 24h urine')
+## LOINC 5902-2 Prothrombin time
+p7 <- plot_liver_lab_raw_values_vs_rel_date(lab_loinc = '5902-2', ylim = c(0, 50)) + ggtitle('PT')
 
-# very very sparse data
-p7 <- plot_lab_raw_values_vs_rel_date(lab_loinc = '2888-6', ylim = c(0, 500)) + ggtitle('Protein in urine')
+## LOINC 1975-2 Bilirubin total
+p8 <- plot_liver_lab_raw_values_vs_rel_date(lab_loinc = '1975-2', ylim = c(0, 15)) + ggtitle('Bilirubin total')
 
-p <- gridExtra::arrangeGrob(p1, p2, p3, p4, p5, p6, p7, ncol = 3)
+## LOINC 1968-7 Bilirubin direct
+p9 <- plot_liver_lab_raw_values_vs_rel_date(lab_loinc = '1968-7', ylim = c(0, 15)) + ggtitle('Bilirubin direct')
 
-ggsave(filename = 'cache/kidney_labs_raw_data_distribution_by_rel_date.png', plot = p, width = 6, height = 6)
+p <- gridExtra::arrangeGrob(p1, p2, p3, p4, p5, p6, p7, p8, p9, ncol = 3)
+
+ggsave(filename = glue('{CACHE_DIR}/liver_labs_raw_data_distribution_by_rel_date.png', plot = p, width = 6, height = 6))
 ```
 
-![liver function labs](./cache/kidney_labs_raw_data_distribution_by_rel_date.png)
+![liver function labs](./../../cache/liver_labs_raw_data_distribution_by_rel_date.png)
 
+
+
+Machine learning part:
+  For each LOINC lab test
+    prepare dataframe for each 
+    data split
+    train logistic regression with either raw numeric value or HPO terms
+    build ROC with test set
+    run statistical comparison to compare the two models
+    
 
 Use -180 as the time cutoff and separate the patient journey into two sections: 0 - 180 days before the first diagnosis of abnormal liver function, and 180 days before the first diagnosis of liver abnormal functions. Within each section, we will pick the latest lab measurement for each LOINC lab test (features) and assign either + (within 180 days) or - outcome (outside of 180 days). 
 ```{r}
@@ -152,26 +171,26 @@ Use -180 as the time cutoff and separate the patient journey into two sections: 
 # for each window, we only use the closest one to diagnosis date as a representative, although we can use other methods such as the mean
 # at last, only the (-7, 0) window has + outcome, meaning having abnormal liver function; all other windows have normal liver function
 
-df_labs_and_outcomes <- df_labs %>% filter(loinc %in% c('2160-0', '3094-0', '6299-2', '2823-3')) %>%
+df_liver_labs_and_outcomes <- df_liver_labs %>% 
   as_tibble() %>%
   select(-min_diag_date, -rel_date) %>% ## these two columns can be removed from the sql query
   ##filter(medical_record_number %in% c('2715515', '3087585')) %>% ## test with a few patient
   left_join(df_cohort, by = 'medical_record_number') %>%
   mutate(lab_date = ymd(lab_date), min_diag_date = ymd(min_diag_date)) %>%
   mutate(lab_date_rel_to_diag = as.duration(interval(min_diag_date, lab_date)) / ddays()) %>%
-  mutate(window_num = cut(lab_date_rel_to_diag, c(-Inf, -100, 0, Inf))) %>%
+  mutate(window_num = cut(lab_date_rel_to_diag, c(-Inf, -180, 0, Inf))) %>%
 ##select(medical_record_number, loinc, lab_date, min_diag_date, lab_date_rel_to_diag, window_num)
-  filter(window_num %in% c('(-Inf,-100]', '(-100,0]')) %>%
+  filter(window_num %in% c('(-Inf,-180]', '(-180,0]')) %>%
   arrange(medical_record_number, loinc, -lab_date_rel_to_diag) %>%
   group_by(medical_record_number, loinc, window_num) %>%
   mutate(sequence = row_number()) %>%
   #select(medical_record_number, loinc, lab_date, min_diag_date, lab_date_rel_to_diag, window_num, sequence) %>%
   ungroup() %>%
   filter(sequence == 1) %>%
-  mutate(outcome = if_else(window_num == '(-100,0]', 'abnormal', 'normal'))
+  mutate(outcome = if_else(window_num == '(-180,0]', 'abnormal', 'normal'))
 
 # the following shows that we have pretty balanced classes for each lab test
-df_labs_and_outcomes %>% group_by(loinc, outcome) %>% summarise(n = n())
+df_liver_labs_and_outcomes %>% group_by(loinc, outcome) %>% summarise(n = n())
 ```
 
 Define a list of functions to run statistical comparisons. 
@@ -231,7 +250,7 @@ compare_rocs <- function(roc1, roc2){
 }
 
 
-pipeline_compare_for_outcome_prediction <- function(df_one_loinc) {
+pipeline_compare_for_liver_function <- function(df_one_loinc) {
   
   df_hpo_features <- create_hpo_features(df_one_loinc = df_one_loinc)
   df_train_test <- train_test_split(df_hpo_features, p = 0.7, list=FALSE)
@@ -262,31 +281,31 @@ pipeline_compare_for_outcome_prediction <- function(df_one_loinc) {
   roc_comparisons_combined
 }
 
-example_loinc = '2160-0'
-df_one_loinc <- df_labs_and_outcomes %>% filter(loinc == example_loinc)
-pipeline_compare_for_outcome_prediction(df_one_loinc = df_one_loinc)
+example_loinc = '1742-6'
+df_one_loinc <- df_liver_labs_and_outcomes %>% filter(loinc == example_loinc)
+pipeline_compare_for_liver_function(df_one_loinc = df_one_loinc)
 ```
 
 
-```{r max.output=-1}
+```{r}
 require(furrr)
-plan(multisession, workers = 4)
+plan(multisession, workers = 6)
 
-kidney_analysis <- df_labs_and_outcomes %>%
+liver_analysis <- df_liver_labs_and_outcomes %>%
   group_by(loinc) %>%
   nest() %>%
   ungroup() %>% 
-  mutate(result = future_map(data, pipeline_compare_for_outcome_prediction)) %>%
+  mutate(result = future_map(data, pipeline_compare_for_liver_function)) %>%
   select(-data) %>%
   unnest(result)
 
-write.csv(kidney_analysis, file = 'cache/acute_kidney_failure_analysis.csv', row.names = FALSE)
+write.csv(liver_analysis, file = glue('{CACHE_DIR}/liver_analysis.csv'), row.names = FALSE)
 
-kidney_analysis
+liver_analysis
 ```
 
 ```{r}
-df_one_loinc <- df_labs_and_outcomes %>% filter(loinc == '2160-0')
+df_one_loinc <- df_liver_labs_and_outcomes %>% filter(loinc == '1742-6')
 
 df_hpo_features <- create_hpo_features(df_one_loinc = df_one_loinc)
 
@@ -298,8 +317,7 @@ df_test <- df_train_test$df_test
   
 lr_H <- lr_for_hpo_H(df_train = df_train, df_test = df_test)
 roc_comparison <- compare_rocs(lr_H[[5]], lr_H[[6]])
-roc_comparison <- bind_cols(roc_comparison)
-roc_comparison$H <- roc_comparison
+
 
 plot(lr_H[[5]])
 plot(lr_H[[6]])

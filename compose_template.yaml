@@ -1,0 +1,46 @@
+version: '3.8'
+services:
+  rstudio:
+    build:
+      context: .
+      dockerfile: ./Dockerfile_custom_RStudio
+    ports:
+      - "8787:8787"
+    volumes:
+      # mount current repo to a Docker folder under the home user directory (default is rstudio)
+      # refer to repo files with relative path
+      - .:/home/rstudio/s4-loinc2hpo-msdw
+      # mount Biopharma_Shared_Workspace on SharePoint HAI to a Docker folder under root directory
+      # make sure you have access to the shared workspace if using OneDrive
+      # make sure you have no spaces in your path (if you do, create a symbolic link.)
+      - { PATH TO YOUR ONEDRIVE/SharePoint }/Biopharma_Shared_Workspace:/Biopharma_Shared_Workspace
+    environment:
+      # disable authentication
+      - DISABLE_AUTH=true
+      # pass database (DSCA PHI) credential as environment variables
+      - DSCA_PHI_HOST={ host }
+      - DSCA_PHI_PORT={ port }
+      - DSCA_PHI_DBNAME={ database name }
+      - DSCA_PHI_USERNAME={ username }
+      - DSCA_PHI_PASSWORD={ password }
+    container_name: "Biopharma_RStudio"
+
+  jupyter:
+    build:
+      context: .
+      dockerfile: ./Dockerfile_custom_Jupyter
+    ports:
+      - "8888:8888"
+    volumes:
+      # refer to the corresponding section above for details
+      - .:/home/jovyan/work/{ NAME OF REPO, e.g. s4-biopharma-collaborate_architype}
+      - { PATH TO YOUR ONEDRIVE/SharePoint }/Biopharma_Shared_Workspace:/Biopharma_Shared_Workspace
+    environment:
+      - DSCA_PHI_HOST={ host }
+      - DSCA_PHI_PORT={ port }
+      - DSCA_PHI_DBNAME={ database name }
+      - DSCA_PHI_USERNAME={ username }
+      - DSCA_PHI_PASSWORD={ password }
+    container_name: "Biopharma_Jupyter"
+
+  # Additional services may be specified here

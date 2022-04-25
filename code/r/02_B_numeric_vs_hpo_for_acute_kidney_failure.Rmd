@@ -6,7 +6,15 @@ output:
 ---
 
 ## Goal
-Compare the performance of raw lab values vs HPO interpretations for seme blood disorders
+Compare the performance of raw lab values vs HPO interpretations for acute kidney failure.
+
+The analysis process is very similar to the liver function analysis.
+
+Algorithm:
+- Define a cohort of patients coded with acute kidney failure as the primay diagnosis of a visit;
+- Get all the lab tests with selected LOINC code; 
+- For each patient, the labs within X days (e.g. 7 days) before the diagnosis date is considered to be associated with + outcome; and the labs further outside of the window is considered to be associated with - outcome; 
+- For each LOINC code, we will prepare a dataframe, separate into training and test set, train a logistic regression classifier using either raw numerical value or HPO value (observed or not observed), build the ROC curve with the test set, and finally compare the ROC curve to determine whether they are statistically different. 
 
 
 ## Analysis
@@ -21,42 +29,46 @@ require(DBI)
 require(RPostgres)
 require(egg)
 require(gridExtra)
-source('.db_credential.R')
 source('functions.R')
-dsca <- DBI::dbConnect(RPostgres::Postgres(), host='localhost', user=user, dbname = dbname, port = 2345, password=password)
+dsca <- DBI::dbConnect(RPostgres::Postgres(), 
+                       host=Sys.getenv('DSCA_PHI_HOST'), 
+                       dbname = Sys.getenv('DSCA_PHI_DBNAME'), 
+                       port = Sys.getenv('DSCA_PHI_PORT'), 
+                       user=Sys.getenv('DSCA_PHI_USERNAME'),
+                       password= Sys.getenv('DSCA_PHI_PASSWORD'))
 
 
 # cache directory to read from or write to
-CACHE_DIR <- './cache'
+CACHE_DIR = '../../cache'
+
 if (!dir.exists(CACHE_DIR)){
   dir.create(CACHE_DIR)
 }
-
-FORCE_RERUN <- TRUE
+FORCE_RERUN <- FALSE
 ```
 
 
-Create a cohort for patients with aplastic anemia.
+Create a cohort for patients with abnormal liver function diagnoses.
 ```{r}
-sql <- read_file('../sql/aplastic_anemia.sql')
+sql <- read_file('../sql/acute_kidney_failure_cohort.sql')
 print(sql)
 n<- dbExecute(dsca, sql)
 ```
 
 
-Retrieve diagnoses information for the cohort.
+Retrieve liver function diagnoses information for the cohort.
 ```{r}
 sql <- "SELECT * FROM cohort"
-df_cohort <- get_df_from_db_or_cache(cache_dir = CACHE_DIR, file_name = 'aplastic_anemia_diagnoses.csv', db_access_callback = dbGetQuery, conn = dsca, statement = sql, force_rerun = FORCE_RERUN)
+df_cohort <- get_df_from_db_or_cache(cache_dir = CACHE_DIR, file_name = 'acute_kidney_failure_diagnoses.csv', db_access_callback = dbGetQuery, conn = dsca, statement = sql, force_rerun = FORCE_RERUN)
 
 df_cohort %>% nrow()
 ```
 
 
-Retrieve related lab tests for the cohort. 
+Retrieve liver function lab tests for the cohort. 
 ```{r}
-sql <- read_file('../sql/get_labs_for_aplastic_anemia.sql')
-df_labs <- get_df_from_db_or_cache(cache_dir = CACHE_DIR, file_name = "labs_aplastic_anemia.csv", db_access_callback = dbGetQuery, conn=dsca, statement = sql, force_rerun = FORCE_RERUN)
+sql <- read_file('../sql/get_labs_for_acute_kidney_failure.sql')
+df_labs <- get_df_from_db_or_cache(cache_dir = CACHE_DIR, file_name = "labs_acute_kidney_failure.csv", db_access_callback = dbGetQuery, conn=dsca, statement = sql, force_rerun = FORCE_RERUN)
 df_labs %>% nrow()
 ```
 
@@ -110,20 +122,29 @@ plot_lab_raw_values_vs_rel_date <- function(lab_loinc, ylim=NULL){
 # p <- arrangeGrob(sapply(plots, function(x) x[[1]]), ncol = 2)
 
 
-p1 <- plot_lab_raw_values_vs_rel_date(lab_loinc = '789-8', ylim = c(0, 10)) + ggtitle('RBC')
+p1 <- plot_lab_raw_values_vs_rel_date(lab_loinc = '2160-0', ylim = c(0, 20)) + ggtitle('Serum creatinine')
 
-p2 <- plot_lab_raw_values_vs_rel_date(lab_loinc = '6690-2', ylim = c(0, 25)) + ggtitle('CBC')
+p2 <- plot_lab_raw_values_vs_rel_date(lab_loinc = '3094-0', ylim = c(0, 150)) + ggtitle('Urea nitrogen in serum')
 
-p3 <- plot_lab_raw_values_vs_rel_date(lab_loinc = '777-3', ylim = c(0, 1000)) + ggtitle('Platelet')
+p3 <- plot_lab_raw_values_vs_rel_date(lab_loinc = '6299-2', ylim = c(0, 200)) + ggtitle('Urea nitrogen in blood')
 
-p4 <- plot_lab_raw_values_vs_rel_date(lab_loinc = '751-8', ylim = c(0, 25)) + ggtitle('neutrophil')
+p4 <- plot_lab_raw_values_vs_rel_date(lab_loinc = '2823-3', ylim = c(0, 10)) + ggtitle('Potassium in serum')
 
-p <- gridExtra::arrangeGrob(p1, p2, p3, p4, ncol = 2)
+# seems the test strip only reports positive or negative outcomes
+p5 <- plot_lab_raw_values_vs_rel_date(lab_loinc = '5804-0', ylim = c(0, 500)) + ggtitle('protein in urine')
 
-ggsave(filename = 'cache/anemia_labs_raw_data_distribution_by_rel_date.png', plot = p, width = 5, height = 5)
+# very sparse data
+p6 <- plot_lab_raw_values_vs_rel_date(lab_loinc = '2889-4', ylim = c(0, 200)) + ggtitle('Protein in 24h urine')
+
+# very very sparse data
+p7 <- plot_lab_raw_values_vs_rel_date(lab_loinc = '2888-6', ylim = c(0, 500)) + ggtitle('Protein in urine')
+
+p <- gridExtra::arrangeGrob(p1, p2, p3, p4, p5, p6, p7, ncol = 3)
+
+ggsave(filename = 'cache/kidney_labs_raw_data_distribution_by_rel_date.png', plot = p, width = 6, height = 6)
 ```
 
-![liver function labs](./cache/anemia_labs_raw_data_distribution_by_rel_date.png)
+![liver function labs](./cache/kidney_labs_raw_data_distribution_by_rel_date.png)
 
 
 Use -180 as the time cutoff and separate the patient journey into two sections: 0 - 180 days before the first diagnosis of abnormal liver function, and 180 days before the first diagnosis of liver abnormal functions. Within each section, we will pick the latest lab measurement for each LOINC lab test (features) and assign either + (within 180 days) or - outcome (outside of 180 days). 
@@ -136,7 +157,7 @@ Use -180 as the time cutoff and separate the patient journey into two sections: 
 # for each window, we only use the closest one to diagnosis date as a representative, although we can use other methods such as the mean
 # at last, only the (-7, 0) window has + outcome, meaning having abnormal liver function; all other windows have normal liver function
 
-df_labs_and_outcomes <- df_labs %>%
+df_labs_and_outcomes <- df_labs %>% filter(loinc %in% c('2160-0', '3094-0', '6299-2', '2823-3')) %>%
   as_tibble() %>%
   select(-min_diag_date, -rel_date) %>% ## these two columns can be removed from the sql query
   ##filter(medical_record_number %in% c('2715515', '3087585')) %>% ## test with a few patient
@@ -246,31 +267,31 @@ pipeline_compare_for_outcome_prediction <- function(df_one_loinc) {
   roc_comparisons_combined
 }
 
-example_loinc = '789-8'
+example_loinc = '2160-0'
 df_one_loinc <- df_labs_and_outcomes %>% filter(loinc == example_loinc)
 pipeline_compare_for_outcome_prediction(df_one_loinc = df_one_loinc)
 ```
 
 
-```{r max.output=-1, message=FALSE}
+```{r max.output=-1}
 require(furrr)
 plan(multisession, workers = 4)
 
-anemia_analysis <- df_labs_and_outcomes %>%
+kidney_analysis <- df_labs_and_outcomes %>%
   group_by(loinc) %>%
   nest() %>%
-  ungroup() %>%
+  ungroup() %>% 
   mutate(result = future_map(data, pipeline_compare_for_outcome_prediction)) %>%
   select(-data) %>%
   unnest(result)
 
-write.csv(anemia_analysis, file = 'cache/anemia_analysis.csv', row.names = FALSE)
+write.csv(kidney_analysis, file = 'cache/acute_kidney_failure_analysis.csv', row.names = FALSE)
 
-anemia_analysis
+kidney_analysis
 ```
 
-```{r message=FALSE}
-df_one_loinc <- df_labs_and_outcomes %>% filter(loinc == '789-8')
+```{r}
+df_one_loinc <- df_labs_and_outcomes %>% filter(loinc == '2160-0')
 
 df_hpo_features <- create_hpo_features(df_one_loinc = df_one_loinc)
 
@@ -280,13 +301,14 @@ df_train <- df_train_test$df_train
 df_test <- df_train_test$df_test
   
   
-lr_L <- lr_for_hpo_L(df_train = df_train, df_test = df_test)
-roc_comparison <- compare_rocs(lr_L[[5]], lr_L[[6]])
+lr_H <- lr_for_hpo_H(df_train = df_train, df_test = df_test)
+roc_comparison <- compare_rocs(lr_H[[5]], lr_H[[6]])
 roc_comparison <- bind_cols(roc_comparison)
+roc_comparison$H <- roc_comparison
 
-plot(lr_L[[5]])
-plot(lr_L[[6]])
+plot(lr_H[[5]])
+plot(lr_H[[6]])
 
-roc.test(lr_L[[5]], lr_L[[6]], method = "bootstrap")
+roc.test(lr_H[[5]], lr_H[[6]], method = "bootstrap")
 ```
 
