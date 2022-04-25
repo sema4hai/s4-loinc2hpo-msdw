@@ -21,6 +21,9 @@ require(DBI)
 require(RPostgres)
 require(egg)
 require(gridExtra)
+require(caret)
+require(broom)
+require(pROC)
 source('functions.R')
 dsca <- DBI::dbConnect(RPostgres::Postgres(), 
                        host=Sys.getenv('DSCA_PHI_HOST'), 
@@ -166,10 +169,6 @@ df_labs_and_outcomes %>% group_by(loinc, outcome) %>% summarise(n = n())
 Define a list of functions to run statistical comparisons. 
 
 ```{r}
-require(caret)
-require(broom)
-require(pROC)
-
 # preprocess: convert the HPO column (and the isnegated column) into three separate features:
 # is_hpoterm_observed_for_H, is_hpoterm_observed_for_L and is_hpoterm_observed_for_N
 # pass in the dataframe of lab tests of one LOINC, return a new dataframe with the three new features

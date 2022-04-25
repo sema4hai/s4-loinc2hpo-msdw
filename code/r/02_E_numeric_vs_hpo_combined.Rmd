@@ -1,6 +1,8 @@
 ---
 title: "numeric vs HPO"
-output: html_notebook
+output:
+  html_document:
+    df_print: paged
 ---
 
 In this page, we combine the analysis of numeric value vs HPO terms for prediction tasks. 
