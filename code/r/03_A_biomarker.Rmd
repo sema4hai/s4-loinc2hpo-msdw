@@ -1,0 +1,240 @@
+---
+title: "Biomarker screening"
+output:
+  html_document:
+    df_print: paged
+---
+
+In this section, we try to screen the phenotypes for biomarkers associated with pregression to severe asthma.
+
+This is Section A, data extraction from database. 
+
+## Database connection
+```{r message=FALSE}
+library(tidyverse)
+library(glue)
+library(readxl)
+require(DBI)
+require(RPostgres)
+require(egg)
+require(gridExtra)
+require(lubridate)
+require(furrr)
+require(dbplyr)
+
+dsca <- DBI::dbConnect(RPostgres::Postgres(), 
+                       host=Sys.getenv('DSCA_PHI_HOST'), 
+                       dbname = Sys.getenv('DSCA_PHI_DBNAME'), 
+                       port = Sys.getenv('DSCA_PHI_PORT'), 
+                       user=Sys.getenv('DSCA_PHI_USERNAME'),
+                       password= Sys.getenv('DSCA_PHI_PASSWORD'))
+
+
+# cache directory to read from or write to
+CACHE_DIR = '../../cache'
+
+if (!dir.exists(CACHE_DIR)){
+  dir.create(CACHE_DIR)
+}
+FORCE_RERUN <- TRUE
+```
+
+
+## Cohort 
+The starting cohort are patients with any asthma (J45) and asthma-related diagnosis. 
+
+Within this starting cohort, we find one subset with severe asthma diagnosis. We further find a subset that has non-severe asthma diagnosis before they progressed to the severe form. These patients are the cases.
+
+Another subcohort are the ones that have never been associated with severe asthma. These patients are the controls. 
+
+Final table has three columns:
+
+- medical_record_number
+- cohort: case or control
+- t0: earliest severe asthma dx date for cases and last asthma diagnosis for controls
+
+
+Create a table for all those with J45 and R06 asthma and wheezing. 
+```{sql connection=dsca}
+-- dx of asthma and asthma-related symptoms
+create temp table asthma_related_dx as 
+select medical_record_number , calendar_date , context_name , context_diagnosis_code 
+from hai_az_prod.diagnosis_2020july dj 
+where context_diagnosis_code ~* '^J45' or context_diagnosis_code ~* '^R06';
+```
+
+Create a table for all those with severe asthma.
+```{sql connection=dsca}
+-- severe asthma
+create temp table severe_asthma_patients as
+select medical_record_number , min(calendar_date) as min_calendar_date
+from hai_az_prod.diagnosis_2020july dj 
+where context_diagnosis_code ~* '^J45\\.5'
+group by medical_record_number;  
+```
+
+A subset of severe asthma patients who were progressed from non-severe to severe. These are cases. 
+```{sql connection=dsca}
+-- severe asthma progressed from non-severe: 2593
+create temp table progressed_to_severe_asthma_patients as
+select distinct medical_record_number 
+from hai_az_prod.diagnosis_2020july dj 
+join severe_asthma_patients using (medical_record_number)
+where (context_diagnosis_code ~* '^J45(\\.)?[2349]' or context_diagnosis_code ~* '^R06') and calendar_date < min_calendar_date;
+```
+
+Patients who had asthma but not severe. These are controls. 
+```{sql connection=dsca}
+-- control : 323420
+create temp table never_severe_asthma_patients as
+select medical_record_number, max(calendar_date) as max_calendar_date, random() as random 
+from asthma_related_dx
+where medical_record_number not in (select medical_record_number from severe_asthma_patients)
+group by medical_record_number ;
+```
+
+Combine cases and controls in one table. For now, we will use 2x case count for controls. 
+```{sql connection=dsca}
+-- combined cohort 
+create temp table cohort as 
+select medical_record_number , min_calendar_date as t0, 'case' as case_or_control
+from severe_asthma_patients 
+join progressed_to_severe_asthma_patients using (medical_record_number)
+union all
+select medical_record_number , max_calendar_date as t0, 'control' as case_or_control
+from never_severe_asthma_patients
+where random < 2593.0 * 2 / 323420;
+```
+
+## Extraction of data
+
+We need to extract the following information:
+
+- the cohort table: medical_record_number, cohort, t0
+- tested phenotypess: medical_record_number, termid, testdate
+- observed phenotypes: medical_record_number, termid, testdate
+- demographics: medical_record_number, sex, race, birthdate
+
+
+Get data from the database. The following method are lazily executed.
+```{r}
+cohort <- tbl(dsca, 'cohort')
+tested_phenotypes <- tbl(dsca, sql("
+    with testable_phenotypes_all as (
+    	select lab.medical_record_number , lab.context_name , lab.lab_date , lab.lab_time , lab.loinc , testable.termid , testable.is_tested_directly
+    	from hai_az_prod.scc_and_epic_lab_after_loinc2hpo_2020july lab
+    	join hai_az_prod.loinc_testable_phenotypes testable on lab.loinc = testable.loincid
+    	join cohort using (medical_record_number)
+      )
+     select medical_record_number, lab_date, termid
+     from testable_phenotypes_all"))
+observed_phenotypes <- tbl(dsca, sql("
+    with abnormal_lab as (
+      select lab.*
+      from hai_az_prod.scc_and_epic_lab_after_loinc2hpo_2020july lab
+      join cohort using (medical_record_number)
+      where hpotermid is not null and not isnegated),
+    abnormal_lab_after_infer as (
+      SELECT l.medical_record_number, l.lab_date, date_part(year, lab_date) as lab_year, l.local_test_code, l.loinc, l.hpotermid, l.isnegated, pair.ancestor , pair.distance
+      FROM abnormal_lab l
+      left join hai_az_prod.hpo_is_a_pairs pair on l.hpotermid = pair.current)
+    select medical_record_number , lab_date, ancestor as termid
+    from abnormal_lab_after_infer"))
+cohort_demographics <- tbl(dsca, sql("
+    select person.*
+    from hai_az_prod.person_msdw_2020july person
+    join cohort using (medical_record_number)"))
+
+```
+
+
+
+
+## Data transformation
+
+- tested phenotypes: calculate testdate relative to t0; cut the relative date into yearly brackets and aggregated on yearly basis
+- observed phenotypes: similar to the above
+- demographics: calculate age at the time of t0
+
+```{r}
+cohort_tested_phenotypes_yearly_count <- tested_phenotypes %>%
+  left_join(cohort, by = 'medical_record_number') %>%
+  # replace below with sql
+  #mutate(lab_date_rel = interval(t0, lab_date) / ddays()) %>% 
+  mutate(lab_date_rel = sql("lab_date - t0")) %>% 
+  filter(lab_date_rel < 0) %>%
+  filter(lab_date_rel > -365 * 3) %>%
+  collect() 
+cohort_tested_phenotypes_yearly_count <- cohort_tested_phenotypes_yearly_count %>%
+  mutate(lab_date_rel_bracket = cut(lab_date_rel / 365, breaks=seq(-3,0))) %>%
+  group_by(medical_record_number, lab_date_rel_bracket, termid) %>% 
+  summarise(termid_count = n(), .groups = 'drop')
+```
+```{r}
+cohort_observed_phenotypes_yearly_count <- observed_phenotypes %>% 
+  left_join(cohort, by = 'medical_record_number') %>%
+  # replace below with sql
+  #mutate(lab_date_rel = interval(t0, lab_date) / ddays()) %>% 
+  mutate(lab_date_rel = sql("lab_date - t0")) %>% 
+  filter(lab_date_rel < 0) %>%
+  filter(lab_date_rel > -365 * 3) %>%
+  collect()
+cohort_observed_phenotypes_yearly_count <- cohort_observed_phenotypes_yearly_count %>% 
+  mutate(lab_date_rel_bracket = cut(lab_date_rel / 365, breaks=seq(-3,0))) %>%
+  group_by(medical_record_number, lab_date_rel_bracket, termid) %>% 
+  summarise(termid_count = n(), .groups = 'drop')
+```
+
+Combine phenotypes in one dataframe: one patient * phenotype per row.
+```{r}
+## collect all the phenotypes in one dataframe
+phenotype_features <- cohort_tested_phenotypes_yearly_count %>% 
+  rename(tested_count = termid_count) %>%
+  left_join(cohort_observed_phenotypes_yearly_count %>% rename(observed_count = termid_count), 
+            by = c('medical_record_number', 'lab_date_rel_bracket', 'termid')) %>%
+  mutate(observed_count = ifelse(is.na(observed_count), 0, observed_count)) %>% 
+  mutate(is_tested = tested_count > 0) %>% # a binary feature
+  mutate(is_observed = observed_count > 0) # a binary feature
+```
+
+The following is the dataframe for confounders (gender, race and age) + outcome (case or control)
+```{r}
+confounders_outcome <- cohort %>% 
+  inner_join(cohort_demographics, by = 'medical_record_number') %>% 
+  collect()
+confounders_outcome <- confounders_outcome %>%
+  mutate(age = interval(date_of_birth, t0) / dyears()) %>%
+  select(medical_record_number, gender, race, age, case_or_control) %>% 
+  filter(!is.na(age))
+```
+
+The final data frame should have the following columns:
+medical_record_number: patient id 
+termid: phenotype
+is_tested: TRUE or FALSE
+is_observed: TRUE or FALSE
+time_window: [-3, -2), [-2, -1), [-1, 0)
+sex
+race
+age: age at first severe asthma diagnosis (cases) or last asthma diagnosis (control)
+outcome: progressed to severe asthma or not
+
+
+## Cache data for future use
+
+Cache two dataframes for downstream statistical analysis: confounders_outcome and phenotype_features.
+```{r}
+cache_data <- TRUE
+
+if (cache_data){
+  cache_list <- list(confounders_outcome = confounders_outcome,
+                     phenotype_features = phenotype_features)
+  
+  for (i in 1:length(cache_list)){
+    filename <- names(cache_list)[[i]]
+    write.table(cache_list[[i]], file = glue('{CACHE_DIR}/{filename}.csv'), sep = ',', row.names = FALSE, col.names = TRUE)
+  }
+}
+```
+
+

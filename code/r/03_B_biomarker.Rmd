@@ -1,0 +1,228 @@
+---
+title: "Biomarker screening"
+output:
+  html_document:
+    df_print: paged
+---
+
+This is Section B, statistical analysis. 
+
+```{r message=FALSE}
+library(tidyverse)
+library(glue)
+library(readxl)
+require(egg)
+require(gridExtra)
+require(lubridate)
+require(furrr)
+
+# cache directory to read from or write to
+CACHE_DIR = '../../cache'
+
+if (!dir.exists(CACHE_DIR)){
+  dir.create(CACHE_DIR)
+}
+
+confounders_outcome <- read_csv(glue('{CACHE_DIR}/confounders_outcome.csv'))
+phenotype_features <- read_csv(glue('{CACHE_DIR}/phenotype_features.csv'))
+```
+
+
+## Statistical analysis
+For the initial analysis, the model is as below:
+
+outcome ~ is_tested + is_tested:is_observed
+
+
+```{r}
+# test statistical modeling with one phenotype
+d <- phenotype_features %>% 
+  filter(termid == 'HP:0001880') %>%
+  filter(lab_date_rel_bracket == '(-1,0]')
+
+d <- phenotype_features %>% 
+  filter(termid == 'HP:0001873') %>%
+  filter(lab_date_rel_bracket == '(-1,0]')
+
+
+
+prepare_Xy <- function(df_phenotype_feature, df_confounders_outcome){
+  df_model <- df_confounders_outcome %>% 
+    left_join(df_phenotype_feature, by = 'medical_record_number') %>%
+    select(medical_record_number, gender, race, age, tested_count, observed_count, is_tested, is_observed, case_or_control) %>%
+    ## fill in missing values
+    replace_na(list(tested_count = 0, observed_count = 0, is_tested = FALSE, is_observed = FALSE)) %>%
+    ## factorize categorical variables
+    mutate(gender = factor(gender)) %>%
+    mutate(race = factor(race)) %>%
+    mutate(is_tested = factor(is_tested)) %>%
+    mutate(is_observed = factor(is_observed)) %>%
+    mutate(case_or_control = factor(case_or_control)) %>%
+    ## set the reference levels for categorical variables
+    mutate(gender = relevel(gender, ref='Male')) %>%
+    mutate(race = relevel(race, ref='White')) %>%
+    mutate(is_tested = relevel(is_tested, ref = 'FALSE')) %>%
+    mutate(is_observed = relevel(is_observed, ref = 'FALSE')) %>%
+    mutate(case_or_control = relevel(case_or_control, ref = 'control'))
+  return (df_model)
+}
+
+glm_Xy <- function(Xy){
+  model <- glm(formula = 'case_or_control ~ gender + race + age + is_tested / is_observed', data = Xy, family = binomial(link = 'logit'))
+  model_coeff <- broom::tidy(model)
+  return (model_coeff)
+}
+
+df_model <- prepare_Xy(df_phenotype_feature = d %>% select(-lab_date_rel_bracket, -termid), 
+                       df_confounders_outcome = confounders_outcome)
+
+# df_model %>% sample_n(10)
+
+glm_Xy(df_model) %>% filter(str_starts(term, 'is_testedTRUE'))
+
+fit_model <- function(df_phenotype_feature, df_confounders_outcome) {
+  df_model <- prepare_Xy(df_phenotype_feature, df_confounders_outcome)
+  model_coeff <- data.frame(term = character(), estimate = double(), std.error = double(), statistic = double(), p.value = double())
+  tryCatch({model_coeff = glm_Xy(df_model)}, error = function(e) warning('cannot fit model'))
+  #error = function(e) print('model did not run'))
+  return (model_coeff)
+}
+
+fit_model(df_phenotype_feature = d %>% select(-lab_date_rel_bracket, -termid), 
+                       df_confounders_outcome = confounders_outcome)
+
+## explore other statistical models
+# model2 <- glmer(formula = 'case_or_control ~ gender + race + age + is_observed + (1 + is_observed | is_tested)', data = df_model, family = binomial(link = 'logit') )
+# summary(model2)
+```
+
+Screen all the phenotypes. Many phenotypes will fail to pass statistical modeling because small patient size, which is fine. 
+
+```{r}
+set.seed(45657)
+tic <- Sys.time()
+
+plan(multisession, workers = 8)
+
+screen_results <- phenotype_features %>% 
+  #filter(termid == 'HP:0001880') %>%
+  #filter(lab_date_rel_bracket == '(-1,0]') %>%
+  group_by(lab_date_rel_bracket, termid) %>%
+  nest() %>%
+  #calling ungroup() is critical for furrr to work in parallel
+  ungroup() %>%
+  mutate(coefficient = future_map(data, fit_model, df_confounders_outcome = confounders_outcome)) %>%
+  select(-data) %>%
+  unnest(coefficient) 
+
+toc <- Sys.time()
+
+toc - tic
+```
+```{r}
+## how many biomarkers we have screened
+## at each time window
+N_BIOMARKERS_SCREENED <- screen_results %>% select(lab_date_rel_bracket, termid) %>% distinct() %>% nrow()
+screen_results %>% group_by(lab_date_rel_bracket) %>% summarise(n = n_distinct(termid))
+```
+
+
+Annotate the screen results by adding the HPO term label, and also create a few different views that rank the results differently. 
+```{r}
+hpo_term_list <- read.csv('../../in/hp_term_list.csv', header = FALSE, col.names = c('termid', 'distance_to_root', 'label'), stringsAsFactors = FALSE)
+
+screen_results_annotated <- screen_results %>%  filter(str_starts(term, 'is_testedTRUE')) %>% arrange(lab_date_rel_bracket) %>%
+  left_join(hpo_term_list, by = 'termid') %>%
+  select(lab_date_rel_bracket, termid, label, distance_to_root, term, distance_to_root, estimate, std.error, statistic, p.value) 
+
+write.csv(screen_results_annotated, file = glue('{CACHE_DIR}/screen_results_annotated.csv'), row.names = FALSE)
+
+screen_results_annotated %>% head()
+```
+
+
+```{r}
+screen_results_annotated_formatted <- screen_results_annotated %>% 
+  mutate(OR = exp(estimate)) %>% 
+  mutate(OR = round(OR, 2)) %>% 
+  #mutate(p.value = scales::scientific(p.value, digits = 3)) %>% 
+  select(-estimate, -std.error, -statistic) %>% 
+  mutate(term = case_when(term == 'is_testedTRUE' ~ 'tested',
+                          term == 'is_testedTRUE:is_observedTRUE' ~ 'observed',
+                          TRUE ~ 'NEVER GONNA HAPPEN')) %>% 
+  pivot_wider(id_cols = c(lab_date_rel_bracket, termid, label, distance_to_root), names_from = term, values_from = c(OR, p.value)) %>% 
+  relocate(p.value_tested, .after = 'OR_tested') %>% 
+  rename(`Odds Ratio (Been Tested)` = OR_tested) %>% 
+  rename(`p value (Been Tested)` = p.value_tested) %>% 
+  rename(`Odds Ratio (Been Observed)` = 'OR_observed') %>% 
+  rename(`p value (Been Observed)` = 'p.value_observed')
+
+write.csv(screen_results_annotated_formatted, file = glue('{CACHE_DIR}/screen_results_annotated.csv'), row.names = FALSE)
+
+screen_results_annotated_formatted %>% head()
+```
+
+Highlight some biomarkers:
+
+Eosinophilia
+```{r}
+eosinophilia <- screen_results_annotated_formatted %>% 
+  filter(label == 'Eosinophilia') %>% 
+  select(-distance_to_root) %>% 
+  mutate(across(starts_with('p value'), scales::scientific))
+
+sjPlot::tab_df(eosinophilia %>% rename(`Lab Year Bracket` = lab_date_rel_bracket), 
+                title = 'Table Association of Eosinophilia with Severe Asthma',
+               file = glue('{CACHE_DIR}/table_eosinophilia_with_severe_asthma.html'),
+               alternate.rows = TRUE)
+
+eosinophilia
+```
+
+Rank by Odds Ratio (Been Observed)
+```{r}
+significant_by_tested_and_observed <- screen_results_annotated_formatted %>% 
+  arrange(desc(`Odds Ratio (Been Observed)`)) %>% 
+  filter(`p value (Been Tested)` < 0.05/N_BIOMARKERS_SCREENED) %>%
+  filter(`p value (Been Observed)` < 0.05/N_BIOMARKERS_SCREENED) %>%
+  filter(`Odds Ratio (Been Tested)` > 1) %>% 
+  filter(`Odds Ratio (Been Observed)` > 1) %>% 
+  filter(lab_date_rel_bracket == '(-1,0]') %>%
+  mutate(across(starts_with('p value'), scales::scientific)) 
+
+significant_by_tested_and_observed_deduped <- significant_by_tested_and_observed %>% 
+  rows_delete(tibble(label = c('Abnormal eosinophil morphology', 
+                               'Abnormal leukocyte morphology',
+                               'Abnormal immune system morphology',
+                               'Abnormal cellular immune system morphology',
+                               'Abnormal leukocyte count',
+                               'Abnormal granulocyte morphology',
+                               'Abnormality of the respiratory system',
+                               'Functional respiratory abnormality')), by = 'label')
+
+significant_by_tested_and_observed_deduped
+```
+```{r}
+significant_by_tested_and_observed_deduped_three_years <- screen_results_annotated_formatted %>% 
+  filter(termid %in% significant_by_tested_and_observed_deduped$termid) %>% 
+  mutate(termid = factor(termid, levels = significant_by_tested_and_observed_deduped$termid)) %>% 
+  arrange(termid, lab_date_rel_bracket) %>%
+  mutate(across(starts_with('p value'), scales::scientific)) 
+
+significant_by_tested_and_observed_deduped_three_years
+```
+
+```{r}
+sjPlot::tab_df(significant_by_tested_and_observed_deduped %>% select(-distance_to_root, -lab_date_rel_bracket), 
+                title = 'Table Selected Phenotypes (within 1 year prior) Associated with Severe Asthma',
+               file = glue('{CACHE_DIR}/table_selected_biomarker_from_labs_within_1_year_prior_to_dx.html'), 
+               alternate.rows = TRUE)
+sjPlot::tab_df(significant_by_tested_and_observed_deduped_three_years %>% 
+                 select(-distance_to_root) %>% rename(`Lab Year Bracket` = lab_date_rel_bracket), 
+                title = 'Table Selected Phenotypes (within past 3 years) Associated with Severe Asthma',
+               file = glue('{CACHE_DIR}/table_selected_biomarker_from_labs_within_3_years_prior_to_dx.html'),
+               alternate.rows = TRUE)
+```
+
+
+
