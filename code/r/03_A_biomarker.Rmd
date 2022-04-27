@@ -32,11 +32,13 @@ dsca <- DBI::dbConnect(RPostgres::Postgres(),
 
 # cache directory to read from or write to
 CACHE_DIR = '../../cache'
-
 if (!dir.exists(CACHE_DIR)){
   dir.create(CACHE_DIR)
 }
-FORCE_RERUN <- TRUE
+
+# if true, ignore cached data and reconnect to database to get latest data;
+# otherwise, use cached data first before trying to connect to database
+FORCE_RERUN <- FALSE
 ```
 
 

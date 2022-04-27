@@ -32,3 +32,11 @@ theme_az <- function(){
           axis.text = element_text(size = 8), 
           legend.text = element_text(size = 8), legend.title = element_text(size = 10))
 }
+
+#' my ggsave
+#' it extends ggplot2::ggsave by saving one plot to multiple files
+ggsave2 <- function(filenames, ...){
+  for (filename in filenames){
+    ggsave(filename, ...)
+  }
+}

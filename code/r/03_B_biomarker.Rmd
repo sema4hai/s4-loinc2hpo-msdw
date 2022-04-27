@@ -18,9 +18,14 @@ require(furrr)
 
 # cache directory to read from or write to
 CACHE_DIR = '../../cache'
-
 if (!dir.exists(CACHE_DIR)){
   dir.create(CACHE_DIR)
+}
+
+# output directory to write analysis results
+OUT_DIR = '../../out'
+if (!dir.exists(OUT_DIR)){
+  dir.create(OUT_DIR)
 }
 
 confounders_outcome <- read_csv(glue('{CACHE_DIR}/confounders_outcome.csv'))
@@ -135,7 +140,7 @@ screen_results_annotated <- screen_results %>%  filter(str_starts(term, 'is_test
   left_join(hpo_term_list, by = 'termid') %>%
   select(lab_date_rel_bracket, termid, label, distance_to_root, term, distance_to_root, estimate, std.error, statistic, p.value) 
 
-write.csv(screen_results_annotated, file = glue('{CACHE_DIR}/screen_results_annotated.csv'), row.names = FALSE)
+write.csv(screen_results_annotated, file = glue('{OUT_DIR}/screen_results_annotated.csv'), row.names = FALSE)
 
 screen_results_annotated %>% head()
 ```
@@ -157,7 +162,7 @@ screen_results_annotated_formatted <- screen_results_annotated %>%
   rename(`Odds Ratio (Been Observed)` = 'OR_observed') %>% 
   rename(`p value (Been Observed)` = 'p.value_observed')
 
-write.csv(screen_results_annotated_formatted, file = glue('{CACHE_DIR}/screen_results_annotated.csv'), row.names = FALSE)
+write.csv(screen_results_annotated_formatted, file = glue('{OUT_DIR}/screen_results_annotated.csv'), row.names = FALSE)
 
 screen_results_annotated_formatted %>% head()
 ```
@@ -173,7 +178,7 @@ eosinophilia <- screen_results_annotated_formatted %>%
 
 sjPlot::tab_df(eosinophilia %>% rename(`Lab Year Bracket` = lab_date_rel_bracket), 
                 title = 'Table Association of Eosinophilia with Severe Asthma',
-               file = glue('{CACHE_DIR}/table_eosinophilia_with_severe_asthma.html'),
+               file = glue('{OUT_DIR}/table_eosinophilia_with_severe_asthma.html'),
                alternate.rows = TRUE)
 
 eosinophilia
@@ -215,12 +220,12 @@ significant_by_tested_and_observed_deduped_three_years
 ```{r}
 sjPlot::tab_df(significant_by_tested_and_observed_deduped %>% select(-distance_to_root, -lab_date_rel_bracket), 
                 title = 'Table Selected Phenotypes (within 1 year prior) Associated with Severe Asthma',
-               file = glue('{CACHE_DIR}/table_selected_biomarker_from_labs_within_1_year_prior_to_dx.html'), 
+               file = glue('{OUT_DIR}/table_selected_biomarker_from_labs_within_1_year_prior_to_dx.html'), 
                alternate.rows = TRUE)
 sjPlot::tab_df(significant_by_tested_and_observed_deduped_three_years %>% 
                  select(-distance_to_root) %>% rename(`Lab Year Bracket` = lab_date_rel_bracket), 
                 title = 'Table Selected Phenotypes (within past 3 years) Associated with Severe Asthma',
-               file = glue('{CACHE_DIR}/table_selected_biomarker_from_labs_within_3_years_prior_to_dx.html'),
+               file = glue('{OUT_DIR}/table_selected_biomarker_from_labs_within_3_years_prior_to_dx.html'),
                alternate.rows = TRUE)
 ```
 

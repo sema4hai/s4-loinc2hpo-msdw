@@ -36,6 +36,15 @@ CACHE_DIR = '../../cache'
 if (!dir.exists(CACHE_DIR)){
   dir.create(CACHE_DIR)
 }
+
+# output directory to write analysis results
+OUT_DIR = '../../out'
+if (!dir.exists(OUT_DIR)){
+  dir.create(OUT_DIR)
+}
+
+# if true, ignore cached data and reconnect to database to get latest data;
+# otherwise, use cached data first before trying to connect to database
 FORCE_RERUN <- FALSE
 ```
 
@@ -140,7 +149,7 @@ p12 <- plot_lab_raw_values_vs_rel_date(lab_loinc = '32623-1', ylim = c(0, 20)) +
 
 p <- gridExtra::arrangeGrob(p1, p2, p3, p4, p5, p6, p7, p8, p9, p10, p11, p12, ncol = 4)
 
-ggsave(filename = glue('{CACHE_DIR}/CRC_labs_raw_data_distribution_by_rel_date.png'), plot = p, width = 8, height = 6)
+ggsave2(filenames = c(glue('{OUT_DIR}/CRC_labs_raw_data_distribution_by_rel_date.png'), glue('{OUT_DIR}/CRC_labs_raw_data_distribution_by_rel_date.pdf')), plot = p, width = 8, height = 6)
 ```
 
 ![CRC labs](../../cache/CRC_labs_raw_data_distribution_by_rel_date.png)
@@ -476,7 +485,7 @@ p <- ggplot(df_demographics_with_outcomes, aes(x = outcome, y = propensity_score
   geom_violin() +
   theme_az()
 
-ggsave(glue("{CACHE_DIR}/plot_CRC_before_matching.png"), width = 2, height = 1.5)
+ggsave2(filenames = c(glue("{OUT_DIR}/plot_CRC_before_matching.png"), glue("{OUT_DIR}/plot_CRC_before_matching.pdf")), width = 2, height = 1.5)
 p
 ```
 ```{r}
@@ -494,10 +503,10 @@ run_matchit <- function(filepath, force_rerun) {
   if (force_rerun | !file.exists(filepath)){
     # place m.out in the global environment with "<<-" (instead of regular "<-")
     m.out <<- matchit(outcome ~ medical_record_number, data = df_demographics_with_outcomes, method = "nearest", distance = df_demographics_with_outcomes$propensity_score)
-    # save the matchit object in cache
+    # save the matchit object in cache to the global environment
     save(m.out, file=filepath)
   }
-  load(file=filepath)
+  load(file=filepath, envir = globalenv())
 }
 
 run_matchit(filepath = glue('{CACHE_DIR}/m.out.obj'), force_rerun = FALSE)
@@ -509,7 +518,7 @@ p <- ggplot(matched_unique_ids_etc, aes(x = outcome, y = propensity_score)) +
   geom_violin() + 
   theme_az()
 
-ggsave(glue("{CACHE_DIR}/plot_CRC_after_matching.png"), plot = p, width = 2, height = 1.5)
+ggsave2(filenames = c(glue("{OUT_DIR}/plot_CRC_after_matching.png"), glue("{OUT_DIR}/plot_CRC_after_matching.pdf")) , plot = p, width = 2, height = 1.5)
 
 plot_match_age <- ggplot(matched_unique_ids_etc, aes(x = outcome, y = age, fill = outcome)) +
   geom_violin(draw_quantiles = c(0.5)) +
@@ -526,9 +535,10 @@ plot_match_race <- ggplot(matched_unique_ids_etc, aes(x = outcome, fill = race))
 
 plot_match <- gridExtra::arrangeGrob(plot_match_age, plot_match_gender, plot_match_race, layout_matrix = rbind(c(1,2), c(3,3)), ncol = 1)
 
-ggsave(filename = glue('{CACHE_DIR}/plot_CRC_age_gender_race_after_matching.png'), plot = plot_match, width = 6, height = 5)
+ggsave2(filenames = c(glue('{OUT_DIR}/plot_CRC_age_gender_race_after_matching.png'), glue('{OUT_DIR}/plot_CRC_age_gender_race_after_matching.pdf')), plot = plot_match, width = 6, height = 5)
 plot(plot_match)
 ```
+<br>
 We need to put back the identifiers of controls to the database in order to selectively retrieve their labs. 
 ```{r}
 dbExecute(dsca, "create temp table if not exists matched_control_cohort (medical_record_number VARCHAR)")
@@ -619,7 +629,7 @@ end_time <- Sys.time()
 print(end_time - start_time)
 
 
-crc_case_matched_controls_analysis %>% write.csv(file = glue('{CACHE_DIR}/crc_case_matched_controls_analysis.csv'), row.names = FALSE)
+crc_case_matched_controls_analysis %>% write.csv(file = glue('{OUT_DIR}/crc_case_matched_controls_analysis.csv'), row.names = FALSE)
 
 
 crc_case_matched_controls_analysis

@@ -11,16 +11,25 @@ In this page, we combine the analysis of numeric value vs HPO terms for predicti
 library(tidyverse)
 library(glue)
 
+source('functions.R')
+
 # cache directory to read from or write to
 CACHE_DIR = '../../cache'
+
+# output directory to write analysis results
+OUT_DIR = '../../out'
+if (!dir.exists(OUT_DIR)){
+  dir.create(OUT_DIR)
+}
+
 ```
 
 Load previous data analysis results
 ```{r}
-liver_analysis <- read.csv(glue('{CACHE_DIR}/liver_analysis.csv'))
-crc_analysis <- read.csv(glue('{CACHE_DIR}/crc_case_matched_controls_analysis.csv'))
-acute_kidney_failure_analysis <- read.csv(glue('{CACHE_DIR}/acute_kidney_failure_analysis.csv'))
-anemia_analysis <- read.csv(glue('{CACHE_DIR}/anemia_analysis.csv'))
+liver_analysis <- read.csv(glue('{OUT_DIR}/liver_analysis.csv'))
+crc_analysis <- read.csv(glue('{OUT_DIR}/crc_case_matched_controls_analysis.csv'))
+acute_kidney_failure_analysis <- read.csv(glue('{OUT_DIR}/acute_kidney_failure_analysis.csv'))
+anemia_analysis <- read.csv(glue('{OUT_DIR}/anemia_analysis.csv'))
 ```
 
 ```{r}
@@ -58,7 +67,7 @@ df <- numeric_vs_hpo_final %>%
 plot_AUC_differences_numeric_vs_hpo <- ggplot(df, aes(x = method, y = auc, group = interaction(disease, loinc))) + 
   geom_point(size = 1) +
   geom_line(aes(color = disease)) +
-  scale_x_discrete(breaks = c('continuous', 'hpo'), labels = c('original numeric value', 'transformed to HPO')) +
+  scale_x_discrete(breaks = c('continuous', 'hpo'), labels = c('numeric', 'HPO')) +
   xlab("Use Lab Test Results As") +
   ylab("AUC") +
   theme_bw() + 
@@ -69,7 +78,7 @@ plot_AUC_differences_numeric_vs_hpo <- ggplot(df, aes(x = method, y = auc, group
           plot.title = element_text(size = 8)) +
   facet_wrap(~ disease)
 
-ggsave(filename = glue('{CACHE_DIR}/plot_AUC_differences_numeric_vs_hpo.pdf'), width = 6, height = 5)
+ggsave2(filenames = c(glue('{OUT_DIR}/plot_AUC_differences_numeric_vs_hpo.png'), glue('{OUT_DIR}/plot_AUC_differences_numeric_vs_hpo.pdf')), plot = plot_AUC_differences_numeric_vs_hpo, width = 3.2, height = 3.2)
 
 plot_AUC_differences_numeric_vs_hpo
 ```

@@ -1,6 +1,8 @@
 ---
 title: "R Notebook"
-output: html_notebook
+output:
+  html_document:
+    df_print: paged
 ---
 
 ## Goal
@@ -39,6 +41,15 @@ CACHE_DIR = '../../cache'
 if (!dir.exists(CACHE_DIR)){
   dir.create(CACHE_DIR)
 }
+
+# output directory to write analysis results
+OUT_DIR = '../../out'
+if (!dir.exists(OUT_DIR)){
+  dir.create(OUT_DIR)
+}
+
+# if true, ignore cached data and reconnect to database to get latest data;
+# otherwise, use cached data first before trying to connect to database
 FORCE_RERUN <- FALSE
 ```
 
@@ -145,7 +156,7 @@ p9 <- plot_liver_lab_raw_values_vs_rel_date(lab_loinc = '1968-7', ylim = c(0, 15
 
 p <- gridExtra::arrangeGrob(p1, p2, p3, p4, p5, p6, p7, p8, p9, ncol = 3)
 
-ggsave(filename = glue('{CACHE_DIR}/liver_labs_raw_data_distribution_by_rel_date.png', plot = p, width = 6, height = 6))
+ggsave2(filenames = c(glue('{OUT_DIR}/liver_labs_raw_data_distribution_by_rel_date.png'), glue('{OUT_DIR}/liver_labs_raw_data_distribution_by_rel_date.pdf')), plot = p, width = 6, height = 6)
 ```
 
 ![liver function labs](./../../cache/liver_labs_raw_data_distribution_by_rel_date.png)
@@ -299,7 +310,7 @@ liver_analysis <- df_liver_labs_and_outcomes %>%
   select(-data) %>%
   unnest(result)
 
-write.csv(liver_analysis, file = glue('{CACHE_DIR}/liver_analysis.csv'), row.names = FALSE)
+write.csv(liver_analysis, file = glue('{OUT_DIR}/liver_analysis.csv'), row.names = FALSE)
 
 liver_analysis
 ```

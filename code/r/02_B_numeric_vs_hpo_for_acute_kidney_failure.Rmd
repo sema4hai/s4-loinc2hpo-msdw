@@ -44,6 +44,15 @@ CACHE_DIR = '../../cache'
 if (!dir.exists(CACHE_DIR)){
   dir.create(CACHE_DIR)
 }
+
+# output directory to write analysis results
+OUT_DIR = '../../out'
+if (!dir.exists(OUT_DIR)){
+  dir.create(OUT_DIR)
+}
+
+# if true, ignore cached data and reconnect to database to get latest data;
+# otherwise, use cached data first before trying to connect to database
 FORCE_RERUN <- FALSE
 ```
 
@@ -141,10 +150,10 @@ p7 <- plot_lab_raw_values_vs_rel_date(lab_loinc = '2888-6', ylim = c(0, 500)) + 
 
 p <- gridExtra::arrangeGrob(p1, p2, p3, p4, p5, p6, p7, ncol = 3)
 
-ggsave(filename = 'cache/kidney_labs_raw_data_distribution_by_rel_date.png', plot = p, width = 6, height = 6)
+ggsave2(filenames = c(glue('{OUT_DIR}/kidney_labs_raw_data_distribution_by_rel_date.png'), glue('{OUT_DIR}/kidney_labs_raw_data_distribution_by_rel_date.pdf')), plot = p, width = 6, height = 6)
 ```
 
-![liver function labs](./cache/kidney_labs_raw_data_distribution_by_rel_date.png)
+![liver function labs](./../../out/kidney_labs_raw_data_distribution_by_rel_date.png)
 
 
 Use -180 as the time cutoff and separate the patient journey into two sections: 0 - 180 days before the first diagnosis of abnormal liver function, and 180 days before the first diagnosis of liver abnormal functions. Within each section, we will pick the latest lab measurement for each LOINC lab test (features) and assign either + (within 180 days) or - outcome (outside of 180 days). 
@@ -285,7 +294,7 @@ kidney_analysis <- df_labs_and_outcomes %>%
   select(-data) %>%
   unnest(result)
 
-write.csv(kidney_analysis, file = 'cache/acute_kidney_failure_analysis.csv', row.names = FALSE)
+write.csv(kidney_analysis, file = glue('{OUT_DIR}/acute_kidney_failure_analysis.csv'), row.names = FALSE)
 
 kidney_analysis
 ```
