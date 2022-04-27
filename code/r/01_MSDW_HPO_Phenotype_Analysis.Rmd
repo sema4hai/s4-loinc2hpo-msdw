@@ -15,6 +15,7 @@ require(DBI)
 require(RPostgres)
 require(egg)
 require(gridExtra)
+source('functions.R')
 dsca <- DBI::dbConnect(RPostgres::Postgres(), 
                        host=Sys.getenv('DSCA_PHI_HOST'), 
                        dbname = Sys.getenv('DSCA_PHI_DBNAME'), 
@@ -94,31 +95,26 @@ patient_race_sex_distribution <- patient_race_sex_distribution %>%
   mutate(gender = recode(gender, 'MSDW_UNKNOWN' = 'Unknown')) %>%
   mutate(gender = recode(gender, 'NOT AVAILABLE'= 'Unknown')) %>%
   mutate(gender = recode(gender, .missing = 'Unknown'))
-
-# the following cleaning are no longer needed after updating the race mapping file
-# recode "African American" as "Black or African American"
-# patient_race_sex_distribution <- patient_race_sex_distribution %>%
-#   mutate(race = recode(race, 'African American' = 'Black or African American'))
 ```
 
 ```{r}
 countByGender <- patient_race_sex_distribution %>% 
   group_by(gender) %>% 
-  summarise(n = sum(n))
+  summarise(n = sum(n)) %>% 
+  mutate(fraction = n / sum(n))
 
 plot_by_sex <- ggplot(countByGender) + 
   geom_bar(aes(x = 1, y = n / sum(n), fill = gender), stat = "identity") + 
   scale_fill_manual(name = "Sex", values = c(Male = "royalblue", Female = "lightcoral", Indeterminant = 'Cyan', Unknown = 'Orange')) + 
   xlab("") + ylab("patient count") +
   coord_polar(theta = "y") + 
-  theme_bw() + 
-  theme(panel.grid = element_blank(), legend.position = c(0.25, 0.7), 
+  theme_az() + 
+  theme(legend.position = c(0.25, 0.7), 
         axis.text = element_blank(), axis.ticks = element_blank(), 
-        axis.title = element_text(size = 8), legend.text = element_text(size = 8), 
-        legend.title = element_text(size = 10), 
         legend.background = element_rect(fill=alpha('white', 0.1)))
 
 ggsave(filename = glue('{CACHE_DIR}/plot_by_sex.png'), plot = plot_by_sex, width = 2.5, height = 2.5)
+ggsave(filename = glue('{CACHE_DIR}/plot_by_sex.pdf'), plot = plot_by_sex, width = 2.5, height = 2.5)
 plot_by_sex
 ```
 
@@ -137,15 +133,22 @@ plot_by_race  <- ggplot(countByRace_Gender %>%
   scale_y_continuous(labels = abs) +
   xlab("") + ylab("patient count") +
   coord_flip() + 
-  theme_bw() + 
-  theme(panel.grid = element_blank(), legend.position = "right", 
-        axis.title = element_text(size = 8), axis.text = element_text(size = 8), 
-        legend.text = element_text(size = 8), legend.title = element_text(size = 10), 
-        legend.background = element_rect(fill=alpha('white', 0.1)))
+  theme_az() + 
+  theme(legend.background = element_rect(fill=alpha('white', 0.1)))
 
 ggsave(filename = glue("{CACHE_DIR}/plotByRace.png"), plot = plot_by_race, width = 5, height = 2)
+ggsave(filename = glue("{CACHE_DIR}/plotByRace.pdf"), plot = plot_by_race, width = 5, height = 2)
 plot_by_race
 ```
+Fraction of each race:
+```{r}
+countByRace_Gender %>% 
+  group_by(race) %>% 
+  summarise(n = sum(n)) %>%
+  mutate(fraction = n / sum(n)) %>% 
+  arrange(desc(fraction))
+```
+
 
 Patient age analysis: find the birth years for all the patients and find their current age
 ```{r}
@@ -174,7 +177,7 @@ get_patient_birth_year_distribution <- function(force_rerun=FALSE, cache_dir=CAC
   
 }
 
-patient_birth_year_sex_distribution <- get_patient_birth_year_distribution(FALSE)
+patient_birth_year_sex_distribution <- get_patient_birth_year_distribution(force_rerun = FORCE_RERUN)
 
 # lump together sex that can be treated as Unknown
 patient_birth_year_sex_distribution <- patient_birth_year_sex_distribution %>% 
@@ -208,17 +211,14 @@ plot_by_birth_year_sex <- patient_birth_year_sex_distribution %>% ungroup() %>%
   scale_y_continuous(labels = abs) +
   xlab('') + ylab('patient count') +
   coord_flip() + 
-      theme_bw() + 
-  theme(panel.grid = element_blank(), legend.position = "right", 
-        axis.title = element_text(size = 8), axis.text = element_text(size = 8), 
-        legend.text = element_text(size = 8), legend.title = element_text(size = 10), 
-        legend.background = element_rect(fill=alpha('white', 0.1)))
+  theme_az() + 
+  theme(legend.background = element_rect(fill=alpha('white', 0.1)))
   }
   
 
 ggsave(filename = glue("{CACHE_DIR}/plotByBirthyearSex.png"), plot = plot_by_birth_year_sex, width = 4, height = 3)
+ggsave(filename = glue("{CACHE_DIR}/plotByBirthyearSex.pdf"), plot = plot_by_birth_year_sex, width = 4, height = 3)
 plot_by_birth_year_sex
-  
 ```
 
 ### Success rate of LOINC2HPO
