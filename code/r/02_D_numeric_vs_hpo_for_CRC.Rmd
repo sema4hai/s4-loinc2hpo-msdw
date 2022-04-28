@@ -21,17 +21,31 @@ require(DBI)
 require(RPostgres)
 require(egg)
 require(gridExtra)
-source('.db_credential.R')
 source('functions.R')
-dsca <- DBI::dbConnect(RPostgres::Postgres(), host='localhost', user=user, dbname = dbname, port = 2345, password=password)
+dsca <- DBI::dbConnect(RPostgres::Postgres(), 
+                       host=Sys.getenv('DSCA_PHI_HOST'), 
+                       dbname = Sys.getenv('DSCA_PHI_DBNAME'), 
+                       port = Sys.getenv('DSCA_PHI_PORT'), 
+                       user=Sys.getenv('DSCA_PHI_USERNAME'),
+                       password= Sys.getenv('DSCA_PHI_PASSWORD'))
 
 
 # cache directory to read from or write to
-CACHE_DIR <- './cache'
+CACHE_DIR = '../../cache'
+
 if (!dir.exists(CACHE_DIR)){
   dir.create(CACHE_DIR)
 }
-FORCE_RERUN <- TRUE
+
+# output directory to write analysis results
+OUT_DIR = '../../out'
+if (!dir.exists(OUT_DIR)){
+  dir.create(OUT_DIR)
+}
+
+# if true, ignore cached data and reconnect to database to get latest data;
+# otherwise, use cached data first before trying to connect to database
+FORCE_RERUN <- FALSE
 ```
 
 
@@ -135,21 +149,20 @@ p12 <- plot_lab_raw_values_vs_rel_date(lab_loinc = '32623-1', ylim = c(0, 20)) +
 
 p <- gridExtra::arrangeGrob(p1, p2, p3, p4, p5, p6, p7, p8, p9, p10, p11, p12, ncol = 4)
 
-ggsave(filename = 'cache/CRC_labs_raw_data_distribution_by_rel_date.png', plot = p, width = 8, height = 6)
+ggsave2(filenames = c(glue('{OUT_DIR}/CRC_labs_raw_data_distribution_by_rel_date.png'), glue('{OUT_DIR}/CRC_labs_raw_data_distribution_by_rel_date.pdf')), plot = p, width = 8, height = 6)
 ```
 
-![liver function labs](./cache/CRC_labs_raw_data_distribution_by_rel_date.png)
+![CRC labs](../../cache/CRC_labs_raw_data_distribution_by_rel_date.png)
 
 
-Use -180 as the time cutoff and separate the patient journey into two sections: 0 - 180 days before the first diagnosis of abnormal liver function, and 180 days before the first diagnosis of liver abnormal functions. Within each section, we will pick the latest lab measurement for each LOINC lab test (features) and assign either + (within 180 days) or - outcome (outside of 180 days). 
+Use -180 as the time cutoff and separate the patient journey into two sections: 0 - 180 days before the first diagnosis of CRC, and >180 days before the first diagnosis of CRC. Within each section, we will pick the latest lab measurement for each LOINC lab test (features) and assign either + (within 180 days) or - outcome (outside of 180 days). 
 ```{r}
 # prepare data entries for + and - outcomes
 # each lab result is associated with an outcome
 # briefly, the following snippet uses the following algorithm:
-# calculate the relative date to the first abnormal liver function diagnosis: if before diagnosis, - days otherwise + days
-# then cut the relative days into a few windows (-Inf, -365), (-365, -30), (-30, -7), (-7, 0) and (0, Inf)
+# calculate the relative date to the first diagnosis: if before diagnosis, - days otherwise + days
+# then cut the relative days into a few windows (-Inf, -180), (-180, 0) and (0, Inf)
 # for each window, we only use the closest one to diagnosis date as a representative, although we can use other methods such as the mean
-# at last, only the (-7, 0) window has + outcome, meaning having abnormal liver function; all other windows have normal liver function
 
 df_labs_and_outcomes <- df_labs %>% filter(!(loinc %in% c('21000-5', '32207-3'))) %>%
   as_tibble() %>%
@@ -281,46 +294,47 @@ df_one_loinc <- df_labs_and_outcomes %>% filter(loinc == example_loinc)
 pipeline_compare_for_outcome_prediction(df_one_loinc = df_one_loinc)
 ```
 
+Skip the following sections.
+<!-- ```{r max.output=-1, message=FALSE} -->
+<!-- require(furrr) -->
+<!-- plan(multisession, workers = 5) -->
 
-```{r max.output=-1, message=FALSE}
-require(furrr)
-plan(multisession, workers = 5)
+<!-- crc_analysis <- df_labs_and_outcomes %>% -->
+<!--   group_by(loinc) %>% -->
+<!--   nest() %>% -->
+<!--   ungroup() %>% -->
+<!--   mutate(result = future_map(data, pipeline_compare_for_outcome_prediction)) %>% -->
+<!--   select(-data) %>% -->
+<!--   unnest(result) -->
 
-crc_analysis <- df_labs_and_outcomes %>%
-  group_by(loinc) %>%
-  nest() %>%
-  ungroup() %>%
-  mutate(result = future_map(data, pipeline_compare_for_outcome_prediction)) %>%
-  select(-data) %>%
-  unnest(result)
+<!-- crc_analysis -->
+<!-- ``` -->
 
-crc_analysis
-```
+<!-- ```{r message=FALSE} -->
+<!-- df_one_loinc <- df_labs_and_outcomes %>% filter(loinc == '4544-3') -->
 
-```{r message=FALSE}
-df_one_loinc <- df_labs_and_outcomes %>% filter(loinc == '4544-3')
+<!-- df_hpo_features <- create_hpo_features(df_one_loinc = df_one_loinc) -->
 
-df_hpo_features <- create_hpo_features(df_one_loinc = df_one_loinc)
+<!-- df_train_test <- train_test_split(df_hpo_features, p = 0.7, list=FALSE) -->
 
-df_train_test <- train_test_split(df_hpo_features, p = 0.7, list=FALSE)
-  
-df_train <- df_train_test$df_train
-df_test <- df_train_test$df_test
-  
-  
-lr_L <- lr_for_hpo_L(df_train = df_train, df_test = df_test)
-roc_comparison <- compare_rocs(lr_L[[5]], lr_L[[6]])
-roc_comparison <- bind_cols(roc_comparison)
+<!-- df_train <- df_train_test$df_train -->
+<!-- df_test <- df_train_test$df_test -->
 
-plot(lr_L[[5]])
-plot(lr_L[[6]])
 
-roc.test(lr_L[[5]], lr_L[[6]], method = "bootstrap")
-```
+<!-- lr_L <- lr_for_hpo_L(df_train = df_train, df_test = df_test) -->
+<!-- roc_comparison <- compare_rocs(lr_L[[5]], lr_L[[6]]) -->
+<!-- roc_comparison <- bind_cols(roc_comparison) -->
+
+<!-- plot(lr_L[[5]]) -->
+<!-- plot(lr_L[[6]]) -->
+
+<!-- roc.test(lr_L[[5]], lr_L[[6]], method = "bootstrap") -->
+<!-- ``` -->
 
 
 
 ## Use separate cohort for control
+
 
 The above section used the same CRC cohort as their controls (patients were assumed CRC free one year before their diagnoses). In this section, we will define a separate cohort as controls. The control cohort are entirely free from any cancer diagnosis. We will start from a random sample of cancer-free patients. 
 
@@ -387,47 +401,48 @@ rm(df_labs_and_outcomes_cases, df_labs_and_outcomes_controls)
 df_labs_and_outcomes_case_control %>% sample_n(10)
 ```
 
+Skip the following code sections.
 
-```{r max.output=-1, message=FALSE}
-require(furrr)
-plan(multisession, workers=8)
-start_time <- Sys.time()
+<!-- ```{r max.output=-1, message=FALSE} -->
+<!-- require(furrr) -->
+<!-- plan(multisession, workers=8) -->
+<!-- start_time <- Sys.time() -->
 
-crc_separate_controls_analysis <- df_labs_and_outcomes_case_control %>%
-  group_by(loinc) %>%
-  nest() %>%
-  ungroup() %>%
-  mutate(result = future_map(data, pipeline_compare_for_outcome_prediction, .options = furrr_options(seed = T))) %>%
-  select(-data) %>%
-  unnest(result)
+<!-- crc_separate_controls_analysis <- df_labs_and_outcomes_case_control %>% -->
+<!--   group_by(loinc) %>% -->
+<!--   nest() %>% -->
+<!--   ungroup() %>% -->
+<!--   mutate(result = future_map(data, pipeline_compare_for_outcome_prediction, .options = furrr_options(seed = T))) %>% -->
+<!--   select(-data) %>% -->
+<!--   unnest(result) -->
 
-end_time <- Sys.time()
+<!-- end_time <- Sys.time() -->
 
-print(end_time - start_time)
+<!-- print(end_time - start_time) -->
 
-crc_separate_controls_analysis
-```
+<!-- crc_separate_controls_analysis -->
+<!-- ``` -->
 
-```{r message=FALSE}
-df_one_loinc <- df_labs_and_outcomes_case_control %>% filter(loinc == '4544-3')
+<!-- ```{r message=FALSE} -->
+<!-- df_one_loinc <- df_labs_and_outcomes_case_control %>% filter(loinc == '4544-3') -->
 
-df_hpo_features <- create_hpo_features(df_one_loinc = df_one_loinc)
+<!-- df_hpo_features <- create_hpo_features(df_one_loinc = df_one_loinc) -->
 
-df_train_test <- train_test_split(df_hpo_features, p = 0.7, list=FALSE)
-  
-df_train <- df_train_test$df_train
-df_test <- df_train_test$df_test
-  
-  
-lr_L <- lr_for_hpo_L(df_train = df_train, df_test = df_test)
-roc_comparison <- compare_rocs(lr_L[[5]], lr_L[[6]])
-roc_comparison <- bind_cols(roc_comparison)
+<!-- df_train_test <- train_test_split(df_hpo_features, p = 0.7, list=FALSE) -->
 
-plot(lr_L[[5]])
-plot(lr_L[[6]])
+<!-- df_train <- df_train_test$df_train -->
+<!-- df_test <- df_train_test$df_test -->
 
-roc.test(lr_L[[5]], lr_L[[6]], method = "bootstrap")
-```
+
+<!-- lr_L <- lr_for_hpo_L(df_train = df_train, df_test = df_test) -->
+<!-- roc_comparison <- compare_rocs(lr_L[[5]], lr_L[[6]]) -->
+<!-- roc_comparison <- bind_cols(roc_comparison) -->
+
+<!-- plot(lr_L[[5]]) -->
+<!-- plot(lr_L[[6]]) -->
+
+<!-- roc.test(lr_L[[5]], lr_L[[6]], method = "bootstrap") -->
+<!-- ``` -->
 
 
 # Age and race matching
@@ -466,8 +481,12 @@ prediction <- predict(model, newdata = df_demographics_with_outcomes , type = 'r
 
 df_demographics_with_outcomes$propensity_score <- prediction
 
-ggplot(df_demographics_with_outcomes, aes(x = outcome, y = propensity_score)) +
-  geom_violin()
+p <- ggplot(df_demographics_with_outcomes, aes(x = outcome, y = propensity_score)) +
+  geom_violin() +
+  theme_az()
+
+ggsave2(filenames = c(glue("{OUT_DIR}/plot_CRC_before_matching.png"), glue("{OUT_DIR}/plot_CRC_before_matching.pdf")), width = 2, height = 1.5)
+p
 ```
 ```{r}
 require(MatchIt)
@@ -478,33 +497,51 @@ require(MatchIt)
 # try this stackoverflow method
 # https://stackoverflow.com/questions/29672088/speedup-matchit
 # still slow, but works
-df_demographics_with_outcomes %>% colnames()
-m.out <- matchit(outcome ~ medical_record_number, data = df_demographics_with_outcomes, method = "nearest", distance = df_demographics_with_outcomes$propensity_score)
-save(m.out, file='m.out.obj')
+# df_demographics_with_outcomes %>% colnames()
+
+run_matchit <- function(filepath, force_rerun) {
+  if (force_rerun | !file.exists(filepath)){
+    # place m.out in the global environment with "<<-" (instead of regular "<-")
+    m.out <<- matchit(outcome ~ medical_record_number, data = df_demographics_with_outcomes, method = "nearest", distance = df_demographics_with_outcomes$propensity_score)
+    # save the matchit object in cache to the global environment
+    save(m.out, file=filepath)
+  }
+  load(file=filepath, envir = globalenv())
+}
+
+run_matchit(filepath = glue('{CACHE_DIR}/m.out.obj'), force_rerun = FALSE)
+
 matched_unique_ids_etc <- match.data(m.out, data = df_demographics_with_outcomes)
 
-matched_unique_ids_etc %>% group_by(outcome) %>% summarise(n =n())
-ggplot(matched_unique_ids_etc, aes(x = outcome, y = propensity_score)) +
-  geom_violin()
+#matched_unique_ids_etc %>% group_by(outcome) %>% summarise(n =n())
+p <- ggplot(matched_unique_ids_etc, aes(x = outcome, y = propensity_score)) +
+  geom_violin() + 
+  theme_az()
+
+ggsave2(filenames = c(glue("{OUT_DIR}/plot_CRC_after_matching.png"), glue("{OUT_DIR}/plot_CRC_after_matching.pdf")) , plot = p, width = 2, height = 1.5)
 
 plot_match_age <- ggplot(matched_unique_ids_etc, aes(x = outcome, y = age, fill = outcome)) +
   geom_violin(draw_quantiles = c(0.5)) +
-  theme(legend.position = 'none')
+  theme(legend.position = 'none') + 
+  theme_az()
 
 plot_match_gender <- ggplot(matched_unique_ids_etc, aes(x = outcome, fill = gender)) +
-  geom_bar(stat = 'count')
+  geom_bar(stat = 'count') + 
+  theme_az()
 
 plot_match_race <- ggplot(matched_unique_ids_etc, aes(x = outcome, fill = race)) +
-  geom_bar(stat = 'count')
+  geom_bar(stat = 'count')+ 
+  theme_az()
 
 plot_match <- gridExtra::arrangeGrob(plot_match_age, plot_match_gender, plot_match_race, layout_matrix = rbind(c(1,2), c(3,3)), ncol = 1)
+
+ggsave2(filenames = c(glue('{OUT_DIR}/plot_CRC_age_gender_race_after_matching.png'), glue('{OUT_DIR}/plot_CRC_age_gender_race_after_matching.pdf')), plot = plot_match, width = 6, height = 5)
 plot(plot_match)
 ```
+<br>
 We need to put back the identifiers of controls to the database in order to selectively retrieve their labs. 
 ```{r}
-dbExecute(dsca, "create table if not exists matched_control_cohort (medical_record_number VARCHAR)")
-dbExecute(dsca, "truncate table matched_control_cohort")
-
+dbExecute(dsca, "create temp table if not exists matched_control_cohort (medical_record_number VARCHAR)")
 
 insert_mrns <- function(mrns_str, dbconn = dsca){
   sql <- glue('insert into matched_control_cohort values {mrns_str};')
@@ -512,6 +549,7 @@ insert_mrns <- function(mrns_str, dbconn = dsca){
   dbExecute(dbconn, sql)
 }
 
+# insert mrns one by one
 matched_unique_ids_etc %>% filter(outcome == 'normal') %>% 
   rowwise() %>%
   mutate(batch_number = sample(seq(10), size = 1, replace = TRUE)) %>%
@@ -523,12 +561,7 @@ matched_unique_ids_etc %>% filter(outcome == 'normal') %>%
 
 # retrieve labs for the matched control cohort
 sql <- read_file('../sql/get_labs_for_colorectal_cancer_matched_control.sql')
-df_matched_control_labs <- get_df_from_db_or_cache(cache_dir = CACHE_DIR, file_name = 'labs_colorectal_cancer_matched_controls.csv', db_access_callback = dbGetQuery, conn = dsca, statement = sql, force_rerun = TRUE)
-
-# drop the matched control cohort
-# persist it for a while for now
-# n <- dbExecute(dsca, "DROP TABLE IF EXISTS matched_control_cohort")
-# assertthat::are_equal(n, 0)
+df_matched_control_labs <- get_df_from_db_or_cache(cache_dir = CACHE_DIR, file_name = 'labs_colorectal_cancer_matched_controls.csv', db_access_callback = dbGetQuery, conn = dsca, statement = sql, force_rerun = FORCE_RERUN)
 ```
 
 Rerun the analysis with the matched controls. 
@@ -578,9 +611,9 @@ rm(df_labs_and_outcomes_cases, df_labs_and_outcomes_matched_controls)
 df_labs_and_outcomes_case_matched_control %>% sample_n(10)
 ```
 
-```{r max.output=-1, message=FALSE}
+```{r message=FALSE, max.output=-1}
 require(furrr)
-plan(multisession, workers=4)
+plan(multisession, workers=8)
 start_time <- Sys.time()
 
 crc_case_matched_controls_analysis <- df_labs_and_outcomes_case_matched_control %>%
@@ -596,44 +629,42 @@ end_time <- Sys.time()
 print(end_time - start_time)
 
 
-crc_case_matched_controls_analysis %>% write.csv(file = 'cache/crc_case_matched_controls_analysis.csv', row.names = FALSE)
+crc_case_matched_controls_analysis %>% write.csv(file = glue('{OUT_DIR}/crc_case_matched_controls_analysis.csv'), row.names = FALSE)
 
 
 crc_case_matched_controls_analysis
-
-
 ```
 
-Combine demographics to see whether the AUC can be improved. 
-```{r}
-df_demographics_case_matched_control <- bind_rows(df_case_demographics %>% select(-min_diag_date), 
-                                                  df_control_demographics %>% filter(medical_record_number %in% 
-                                                                                       unique(df_matched_control_labs$medical_record_number)) %>%
-                                                    filter(!(medical_record_number %in% df_case_demographics$medical_record_number)))
+<!-- Combine demographics to see whether the AUC can be improved. It is not used in the manuscript.  -->
+<!-- ```{r} -->
+<!-- df_demographics_case_matched_control <- bind_rows(df_case_demographics %>% select(-min_diag_date),  -->
+<!--                                                   df_control_demographics %>% filter(medical_record_number %in%  -->
+<!--                                                                                        unique(df_matched_control_labs$medical_record_number)) %>% -->
+<!--                                                     filter(!(medical_record_number %in% df_case_demographics$medical_record_number))) -->
 
 
-plan(multisession, workers=4)
-start_time <- Sys.time()
+<!-- plan(multisession, workers=4) -->
+<!-- start_time <- Sys.time() -->
 
-crc_case_matched_controls_analysis_with_demographics <- df_labs_and_outcomes_case_matched_control %>%
-  left_join(df_demographics_case_matched_control, by = 'medical_record_number') %>%
-  mutate(age = as.duration(interval(date_of_birth, lab_date)) / dyears()) %>%
-  filter(!(race %in% c('African American', 'American Indian or Alaska Native', 'Native Hawaiian or Other Pacific Islander'))) %>%
-  # mutate(gender = as.factor(gender),
-  #        race = as.factor(race)) %>% 
-  # mutate(gender = relevel(gender, 'Male'),
-  #        race = relevel(race, 'White')) %>%
-  group_by(loinc) %>%
-  nest() %>%
-  ungroup() %>% 
-  mutate(result = future_map(data, pipeline_compare_for_outcome_prediction, include_demographics=TRUE, .options = furrr_options(seed = T))) %>%
-  select(-data) %>%
-  unnest(result)
+<!-- crc_case_matched_controls_analysis_with_demographics <- df_labs_and_outcomes_case_matched_control %>% -->
+<!--   left_join(df_demographics_case_matched_control, by = 'medical_record_number') %>% -->
+<!--   mutate(age = as.duration(interval(date_of_birth, lab_date)) / dyears()) %>% -->
+<!--   filter(!(race %in% c('African American', 'American Indian or Alaska Native', 'Native Hawaiian or Other Pacific Islander'))) %>% -->
+<!--   # mutate(gender = as.factor(gender), -->
+<!--   #        race = as.factor(race)) %>%  -->
+<!--   # mutate(gender = relevel(gender, 'Male'), -->
+<!--   #        race = relevel(race, 'White')) %>% -->
+<!--   group_by(loinc) %>% -->
+<!--   nest() %>% -->
+<!--   ungroup() %>%  -->
+<!--   mutate(result = future_map(data, pipeline_compare_for_outcome_prediction, include_demographics=TRUE, .options = furrr_options(seed = T))) %>% -->
+<!--   select(-data) %>% -->
+<!--   unnest(result) -->
 
-end_time <- Sys.time()
+<!-- end_time <- Sys.time() -->
 
-print(end_time - start_time)
+<!-- print(end_time - start_time) -->
 
-crc_case_matched_controls_analysis_with_demographics
-```
+<!-- crc_case_matched_controls_analysis_with_demographics -->
+<!-- ``` -->
 

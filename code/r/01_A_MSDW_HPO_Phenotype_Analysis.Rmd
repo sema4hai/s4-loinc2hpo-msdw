@@ -15,17 +15,27 @@ require(DBI)
 require(RPostgres)
 require(egg)
 require(gridExtra)
-source('.db_credential.R')
-dsca <- DBI::dbConnect(RPostgres::Postgres(), host='localhost', user=user, dbname = dbname, port = 2345, password=password)
+source('functions.R')
+dsca <- DBI::dbConnect(RPostgres::Postgres(), 
+                       host=Sys.getenv('DSCA_PHI_HOST'), 
+                       dbname = Sys.getenv('DSCA_PHI_DBNAME'), 
+                       port = Sys.getenv('DSCA_PHI_PORT'), 
+                       user=Sys.getenv('DSCA_PHI_USERNAME'),
+                       password= Sys.getenv('DSCA_PHI_PASSWORD'))
 ```
 
 
 ## ANALYSIS
 
 ```{r}
-CACHE_DIR = 'cache'
+CACHE_DIR = '../../cache'
 if (!dir.exists(CACHE_DIR)){
   dir.create(CACHE_DIR)
+}
+
+OUT_DIR = '../../out'
+if (!dir.exists(OUT_DIR)){
+  dir.create(OUT_DIR)
 }
 
 get_db_data <- function(sql, df_path, force_rerun=FALSE, cache_dir=CACHE_DIR){
@@ -39,6 +49,8 @@ get_db_data <- function(sql, df_path, force_rerun=FALSE, cache_dir=CACHE_DIR){
   return (df)
 }
 
+# if true, ignore cached data and reconnect to database to get latest data;
+# otherwise, use cached data first before trying to connect to database
 FORCE_RERUN <- FALSE
 ```
 
@@ -78,7 +90,7 @@ get_patient_race_sex_distribution <- function(force_rerun=FALSE, cache_dir=CACHE
   
 }
 
-patient_race_sex_distribution <- get_patient_race_sex_distribution(force_rerun = FALSE)
+patient_race_sex_distribution <- get_patient_race_sex_distribution(force_rerun = FORCE_RERUN)
 
 
 # recode all unknown gender as one category
@@ -88,31 +100,25 @@ patient_race_sex_distribution <- patient_race_sex_distribution %>%
   mutate(gender = recode(gender, 'MSDW_UNKNOWN' = 'Unknown')) %>%
   mutate(gender = recode(gender, 'NOT AVAILABLE'= 'Unknown')) %>%
   mutate(gender = recode(gender, .missing = 'Unknown'))
-
-# the following cleaning are no longer needed after updating the race mapping file
-# recode "African American" as "Black or African American"
-# patient_race_sex_distribution <- patient_race_sex_distribution %>%
-#   mutate(race = recode(race, 'African American' = 'Black or African American'))
 ```
 
 ```{r}
 countByGender <- patient_race_sex_distribution %>% 
   group_by(gender) %>% 
-  summarise(n = sum(n))
+  summarise(n = sum(n)) %>% 
+  mutate(fraction = n / sum(n))
 
 plot_by_sex <- ggplot(countByGender) + 
   geom_bar(aes(x = 1, y = n / sum(n), fill = gender), stat = "identity") + 
   scale_fill_manual(name = "Sex", values = c(Male = "royalblue", Female = "lightcoral", Indeterminant = 'Cyan', Unknown = 'Orange')) + 
   xlab("") + ylab("patient count") +
   coord_polar(theta = "y") + 
-  theme_bw() + 
-  theme(panel.grid = element_blank(), legend.position = c(0.25, 0.7), 
+  theme_az() + 
+  theme(legend.position = c(0.25, 0.7), 
         axis.text = element_blank(), axis.ticks = element_blank(), 
-        axis.title = element_text(size = 8), legend.text = element_text(size = 8), 
-        legend.title = element_text(size = 10), 
         legend.background = element_rect(fill=alpha('white', 0.1)))
 
-ggsave(filename = glue('{CACHE_DIR}/plot_by_sex.png'), plot = plot_by_sex, width = 2.5, height = 2.5)
+ggsave2(filenames = c(glue('{OUT_DIR}/plot_by_sex.png'), glue('{OUT_DIR}/plot_by_sex.pdf')), plot = plot_by_sex, width = 2.5, height = 2.5)
 plot_by_sex
 ```
 
@@ -131,15 +137,21 @@ plot_by_race  <- ggplot(countByRace_Gender %>%
   scale_y_continuous(labels = abs) +
   xlab("") + ylab("patient count") +
   coord_flip() + 
-  theme_bw() + 
-  theme(panel.grid = element_blank(), legend.position = "right", 
-        axis.title = element_text(size = 8), axis.text = element_text(size = 8), 
-        legend.text = element_text(size = 8), legend.title = element_text(size = 10), 
-        legend.background = element_rect(fill=alpha('white', 0.1)))
+  theme_az() + 
+  theme(legend.background = element_rect(fill=alpha('white', 0.1)))
 
-ggsave(filename = glue("{CACHE_DIR}/plotByRace.png"), plot = plot_by_race, width = 5, height = 2)
+ggsave2(filenames = c(glue("{OUT_DIR}/plotByRace.png"), glue("{OUT_DIR}/plotByRace.pdf")), plot = plot_by_race, width = 5, height = 2)
 plot_by_race
 ```
+Fraction of each race:
+```{r}
+countByRace_Gender %>% 
+  group_by(race) %>% 
+  summarise(n = sum(n)) %>%
+  mutate(fraction = n / sum(n)) %>% 
+  arrange(desc(fraction))
+```
+
 
 Patient age analysis: find the birth years for all the patients and find their current age
 ```{r}
@@ -168,7 +180,7 @@ get_patient_birth_year_distribution <- function(force_rerun=FALSE, cache_dir=CAC
   
 }
 
-patient_birth_year_sex_distribution <- get_patient_birth_year_distribution(FALSE)
+patient_birth_year_sex_distribution <- get_patient_birth_year_distribution(force_rerun = FORCE_RERUN)
 
 # lump together sex that can be treated as Unknown
 patient_birth_year_sex_distribution <- patient_birth_year_sex_distribution %>% 
@@ -202,17 +214,13 @@ plot_by_birth_year_sex <- patient_birth_year_sex_distribution %>% ungroup() %>%
   scale_y_continuous(labels = abs) +
   xlab('') + ylab('patient count') +
   coord_flip() + 
-      theme_bw() + 
-  theme(panel.grid = element_blank(), legend.position = "right", 
-        axis.title = element_text(size = 8), axis.text = element_text(size = 8), 
-        legend.text = element_text(size = 8), legend.title = element_text(size = 10), 
-        legend.background = element_rect(fill=alpha('white', 0.1)))
+  theme_az() + 
+  theme(legend.background = element_rect(fill=alpha('white', 0.1)))
   }
   
 
-ggsave(filename = glue("{CACHE_DIR}/plotByBirthyearSex.png"), plot = plot_by_birth_year_sex, width = 4, height = 3)
+ggsave2(filenames = c(glue("{OUT_DIR}/plotByBirthyearSex.png"), glue("{OUT_DIR}/plotByBirthyearSex.pdf")), plot = plot_by_birth_year_sex, width = 4, height = 3)
 plot_by_birth_year_sex
-  
 ```
 
 ### Success rate of LOINC2HPO
@@ -360,7 +368,7 @@ plot_by_phenotypes_per_patient <- ggplot(hpo_counts_per_patient) +
   theme(panel.grid = element_blank(),
         axis.title = element_text(size = 8), axis.text = element_text(size = 8), 
         legend.text = element_text(size = 8), legend.title = element_text(size = 10))
-ggsave(filename = glue("{CACHE_DIR}/plotByPhenotypesPerPatient.png"), plot = plot_by_phenotypes_per_patient, width = 3, height = 2)
+ggsave2(filenames = c(glue("{OUT_DIR}/plotByPhenotypesPerPatient.png"), glue("{OUT_DIR}/plotByPhenotypesPerPatient.pdf")), plot = plot_by_phenotypes_per_patient, width = 3, height = 2)
 plot_by_phenotypes_per_patient
 ```
 Plot distribution of abnormal phenotypes (distinct) after inference
@@ -373,7 +381,7 @@ plot_by_distinct_abnormal_hpo_infer_per_patient <- ggplot(hpo_counts_per_patient
   theme(panel.grid = element_blank(),
         axis.title = element_text(size = 8), axis.text = element_text(size = 8), 
         legend.text = element_text(size = 8), legend.title = element_text(size = 10))
-ggsave(filename = glue("{CACHE_DIR}/plotByDistinctAbnormalPhenotypeInferPerPatient.png"), plot = plot_by_distinct_abnormal_hpo_infer_per_patient, width = 3, height = 2)
+ggsave2(filenames = c(glue("{OUT_DIR}/plotByDistinctAbnormalPhenotypeInferPerPatient.png"), glue("{OUT_DIR}/plotByDistinctAbnormalPhenotypeInferPerPatient.pdf")), plot = plot_by_distinct_abnormal_hpo_infer_per_patient, width = 3, height = 2)
 plot_by_distinct_abnormal_hpo_infer_per_patient
 ```
 
@@ -426,7 +434,7 @@ patient_lab_phenotype_journeys_formated <- patient_lab_phenotype_journeys %>%
   slice_head(n = 5) %>% 
   mutate(display = glue('{hpotermid} {label} ({n} times)')) %>% 
   summarise(display = str_c(display, collapse = '\n'), .groups = 'drop')
-write.csv(patient_lab_phenotype_journeys_formated, file = glue('{CACHE_DIR}/patient_lab_phenotype_journey_formatted.csv'))
+write.csv(patient_lab_phenotype_journeys_formated, file = glue('{OUT_DIR}/patient_lab_phenotype_journey_formatted.csv'))
 ```
 
 
@@ -612,10 +620,7 @@ plot_phenotypes_of_interest_by_year <- function(terms_of_interest, df, normalize
     scale_color_discrete(breaks = hpo_terms_selected$termid, labels = str_c(hpo_terms_selected$termid, hpo_terms_selected$label, sep = " ")) +
     xlab('Year') +
     ylab(y_label) +
-    theme_bw() +
-    theme(panel.grid = element_blank(),
-        axis.title = element_text(size = 8), axis.text = element_text(size = 8), 
-        legend.text = element_text(size = 8), legend.title = element_text(size = 10))
+    theme_az()
   
   return (p)
 }
@@ -624,7 +629,7 @@ plot_phenotypes_of_interest_by_year <- function(terms_of_interest, df, normalize
 
 hpo_level_1_terms <- phenotype_rank_all_by_year %>% filter(distancetoroot == 1) %>% select(termid, label) %>% distinct()
 p <- plot_phenotypes_of_interest_by_year(terms_of_interest = hpo_level_1_terms$termid, df=phenotype_rank_all_by_year, normalize = FALSE)
-ggsave(filename = glue('{CACHE_DIR}/plot_abnormal_phenotypes_by_year_level_1.pdf'), plot = p, width = 8, height = 4)
+ggsave2(filenames = c(glue('{OUT_DIR}/plot_abnormal_phenotypes_by_year_level_1.png'), glue('{OUT_DIR}/plot_abnormal_phenotypes_by_year_level_1.pdf')), plot = p, width = 8, height = 4)
 p
 ```
 
@@ -632,7 +637,7 @@ p
 hpo_level_1_terms <- phenotype_rank_all_by_year %>% filter(distancetoroot == 1) %>% select(termid, label) %>% distinct()
 p <- plot_phenotypes_of_interest_by_year(terms_of_interest = hpo_level_1_terms$termid, df= phenotype_rank_all_by_year %>%
                                            left_join(tested_patient_count_by_year %>% rename(n_tested = n_patient), by = 'lab_year'), normalize = TRUE)
-ggsave(filename = glue('{CACHE_DIR}/plot_abnormal_phenotypes_by_year_level_1_normalized.pdf'), plot = p, width = 8, height = 4)
+ggsave2(filenames = c(glue('{OUT_DIR}/plot_abnormal_phenotypes_by_year_level_1_normalized.png'), glue('{OUT_DIR}/plot_abnormal_phenotypes_by_year_level_1_normalized.pdf')), plot = p, width = 8, height = 4)
 p
 ```
 
@@ -662,7 +667,7 @@ trendline_lm_test_formatted <- trendline_lm_test %>% select(termid, label, estim
   mutate(across(.cols = function(x) is.double(x), function(x) scales::scientific(x, digits = 3)))
   
 
-write.csv(trendline_lm_test_formatted, file = glue('{CACHE_DIR}/table_abnormal_phenotypes_by_year_level_1_normalized_trendline_lm_model.csv'), row.names=FALSE)
+write.csv(trendline_lm_test_formatted, file = glue('{OUT_DIR}/table_abnormal_phenotypes_by_year_level_1_normalized_trendline_lm_model.csv'), row.names=FALSE)
 
 trendline_lm_test_formatted
 ```
@@ -741,7 +746,7 @@ tested_phenotype_rank_all <- get_tested_phenotype_rank_all(force_rerun = FORCE_R
 
 For the directly tested phenotypes, we can observe what are the most tested abnormalities in one healthcare system. 
 ```{r}
-tested_phenotype_rank_direct %>% head(10) %>% formattable::formattable()
+tested_phenotype_rank_direct %>% head(10)
 ```
 
 
@@ -792,12 +797,12 @@ tested_phenotype_rank_all_by_year <- get_tested_phenotype_rank_all_by_year(force
 ```{r}
 hpo_level_1_terms <- tested_phenotype_rank_all_by_year %>% filter(distancetoroot == 1) %>% select(termid, label) %>% distinct()
 p <- plot_phenotypes_of_interest_by_year(terms_of_interest = hpo_level_1_terms$termid, df=tested_phenotype_rank_all_by_year, normalize = FALSE)
-ggsave(filename = glue('{CACHE_DIR}/plot_tested_phenotypes_by_year_level_1.pdf'), plot = p, width = 8, height = 4)
+ggsave2(filenames = c(glue('{OUT_DIR}/plot_tested_phenotypes_by_year_level_1.png'), glue('{OUT_DIR}/plot_tested_phenotypes_by_year_level_1.pdf')), plot = p, width = 8, height = 4)
 p
 ```
 ```{r}
 p <- plot_phenotypes_of_interest_by_year(terms_of_interest = hpo_level_1_terms$termid, df=tested_phenotype_rank_all_by_year %>% left_join(tested_patient_count_by_year %>% rename(n_tested = n_patient), by = 'lab_year'), normalize = TRUE)
-ggsave(filename = glue('{CACHE_DIR}/plot_tested_phenotypes_by_year_level_1_normalized.pdf'), plot = p, width = 8, height = 4)
+ggsave2(filenames = c(glue('{OUT_DIR}/plot_tested_phenotypes_by_year_level_1_normalized.png'), glue('{OUT_DIR}/plot_tested_phenotypes_by_year_level_1_normalized.pdf')), plot = p, width = 8, height = 4)
 p
 ```
 
@@ -825,7 +830,7 @@ trendline_lm_test_formatted <- trendline_lm_test %>% select(termid, label, estim
   mutate(across(.cols = function(x) is.double(x), function(x) scales::scientific(x, digits = 3)))
   
 
-write.csv(trendline_lm_test_formatted, file = glue('{CACHE_DIR}/table_tested_phenotypes_by_year_level_1_normalized_trendline_lm_model.csv'), row.names=FALSE)
+write.csv(trendline_lm_test_formatted, file = glue('{OUT_DIR}/table_tested_phenotypes_by_year_level_1_normalized_trendline_lm_model.csv'), row.names=FALSE)
 
 trendline_lm_test_formatted
 ```
@@ -1192,7 +1197,7 @@ racial_abnormality_fisher <- phenotype_rank_all_by_year_race_sex %>%
 
 racial_abnormality_fisher %>% nrow()
 
-write.csv(racial_abnormality_fisher, file = glue('{CACHE_DIR}/racial_abnormality_fisher.csv'), row.names = FALSE)
+write.csv(racial_abnormality_fisher, file = glue('{OUT_DIR}/racial_abnormality_fisher.csv'), row.names = FALSE)
 
 p <- racial_abnormality_fisher %>% filter(between(lab_year, 2003, 2019)) %>% 
   #filter(race == 'Black or African American') %>% 
@@ -1216,7 +1221,7 @@ p <- racial_abnormality_fisher %>% filter(between(lab_year, 2003, 2019)) %>%
     facet_wrap(~race, ncol = 1)
   }
 
-ggsave(filename = glue('{CACHE_DIR}/plot_by_phenotype_racial_difference_over_years.pdf'), plot = p, width = 8, height = 8)
+ggsave2(filenames = c(glue('{OUT_DIR}/plot_by_phenotype_racial_difference_over_years.png'), glue('{OUT_DIR}/plot_by_phenotype_racial_difference_over_years.pdf')), plot = p, width = 8, height = 8)
  
 p
 ```
@@ -1267,7 +1272,7 @@ racial_tested_abnormality_fisher <- tested_phenotype_rank_all_by_race_year_sex %
 
 racial_tested_abnormality_fisher %>% nrow()
 
-write.csv(racial_tested_abnormality_fisher, file = glue('{CACHE_DIR}/racial_tested_abnormality_fisher.csv'), row.names = FALSE)
+write.csv(racial_tested_abnormality_fisher, file = glue('{OUT_DIR}/racial_tested_abnormality_fisher.csv'), row.names = FALSE)
 
 p <- racial_tested_abnormality_fisher %>% filter(between(lab_year, 2003, 2019)) %>%
   #filter(race == 'Black or African American') %>%
@@ -1291,7 +1296,7 @@ p <- racial_tested_abnormality_fisher %>% filter(between(lab_year, 2003, 2019)) 
     facet_wrap(~race, ncol = 1)
   }
 
-ggsave(filename = glue('{CACHE_DIR}/plot_by_tested_phenotype_racial_difference_over_years.pdf'), plot = p, width = 8, height = 8)
+ggsave2(filenames = c(glue('{OUT_DIR}/plot_by_tested_phenotype_racial_difference_over_years.png'), glue('{OUT_DIR}/plot_by_tested_phenotype_racial_difference_over_years.pdf')), plot = p, width = 8, height = 8)
 
 p
 ```
@@ -1324,7 +1329,7 @@ overly_tested_abnormalities_by_each_race_top10 <- racial_tested_abnormality_fish
          lab_record = n_record,
          patient_count = n_patient)
 
-write.csv(overly_tested_abnormalities_by_each_race_top10, file=glue('{CACHE_DIR}/overly_tested_abnormalities_by_each_race_top10.csv'), row.names = FALSE)
+write.csv(overly_tested_abnormalities_by_each_race_top10, file=glue('{OUT_DIR}/overly_tested_abnormalities_by_each_race_top10.csv'), row.names = FALSE)
 
 overly_tested_abnormalities_by_each_race_top10 %>% 
   ungroup() %>% 
@@ -1340,7 +1345,7 @@ overly_tested_abnormalities_by_each_race_top10 %>%
                                                  alternate.rows = TRUE, 
                                                  title = glue("Top 10 Overly Tested Lab Phenotype for {race_name}"), 
                                                  use.viewer = FALSE, 
-                                                 file = glue('{CACHE_DIR}/table_overly_tested_abnormalities_for_{race_name}_top10.html')))
+                                                 file = glue('{OUT_DIR}/table_overly_tested_abnormalities_for_{race_name}_top10.html')))
   }
   
 race_name = 'Asian'
@@ -1360,7 +1365,7 @@ table_overly_tested_by_race <- function(race_name){
                 phenotypes with less than 1700 tested patients were excluded',
                  show.footnote = TRUE,
                      use.viewer = FALSE, 
-                     file = glue('{CACHE_DIR}/table_overly_tested_abnormalities_for_{race_name}_top10.html'))
+                     file = glue('{OUT_DIR}/table_overly_tested_abnormalities_for_{race_name}_top10.html'))
 }
 table_overly_tested_by_race(race_name = 'Asian')
 table_overly_tested_by_race(race_name = 'Black or African American')

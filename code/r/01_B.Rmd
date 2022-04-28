@@ -1,0 +1,134 @@
+---
+title: "01_B_observed_normalized_by_tested"
+output: html_document
+date: '2022-04-27'
+author: Aaron Zhang
+---
+
+This is a small extension for the main analysis of "01_MSDW_HPO_Phenotype_Analysis.Rmd". 
+The goal is to analyze the trendlines of observed phenotypes but now normalize by how many patients were tested for each corresponding phenotype. 
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(tidyverse)
+library(glue)
+source('functions.R')
+```
+
+
+## load data
+```{r}
+# cache directory to read from or write to
+CACHE_DIR = '../../cache'
+if (!dir.exists(CACHE_DIR)){
+  dir.create(CACHE_DIR)
+}
+
+# output directory to write analysis results
+OUT_DIR = '../../out'
+if (!dir.exists(OUT_DIR)){
+  dir.create(OUT_DIR)
+}
+
+tested_phenotype_rank_all_by_year <- read_csv(glue('{CACHE_DIR}/tested_phenotype_rank_all_by_year.csv'))
+observed_phenotype_rank_all_by_year <- read_csv(glue('{CACHE_DIR}/observed_phenotype_rank_all_by_year.csv'))
+```
+
+## analysis
+Calculate fraction of patients observed for each phenotype by patients tested for that phenotype. 
+```{r}
+observed_divide_tested_all_by_year <- observed_phenotype_rank_all_by_year %>% 
+  rename(n_patient_observed = n_patient) %>% 
+  select(-n_record) %>%
+  left_join(tested_phenotype_rank_all_by_year %>% 
+              rename(n_patient_tested = n_patient) %>% 
+              select(termid, lab_year, n_patient_tested),
+            by = c('termid', 'lab_year')) %>%
+  relocate(n_patient_tested, .after = n_patient_observed) %>%
+  mutate(frac_observed_tested = n_patient_observed / n_patient_tested)
+```
+
+Below, we plot level HPO terms.
+```{r}
+plot_phenotypes_of_interest_by_year <- function(terms_of_interest, df){
+  hpo_terms_selected <- df %>% filter(termid %in% terms_of_interest) %>% select(termid, label) %>% distinct()
+  
+  y_str = 'frac_observed_tested'
+  y_label = 'patient fraction (observed / tested)'
+
+  p <- df %>% filter(termid %in% terms_of_interest) %>% 
+    filter(lab_year <= 2019 & lab_year > 2000) %>%
+    ggplot(aes(x = lab_year, y = eval(parse(text=y_str)), group = termid, color = termid)) + 
+    geom_point() +
+    geom_line() +
+    scale_color_discrete(breaks = hpo_terms_selected$termid, labels = str_c(hpo_terms_selected$termid, hpo_terms_selected$label, sep = " ")) +
+    xlab('Year') +
+    ylab(y_label) +
+    theme_az()
+  
+  return (p)
+}
+```
+
+```{r}
+hpo_level_1_terms <- observed_phenotype_rank_all_by_year %>% filter(distancetoroot == 1) %>% select(termid, label) %>% distinct()
+
+p <- plot_phenotypes_of_interest_by_year(terms_of_interest = hpo_level_1_terms$termid, df=observed_divide_tested_all_by_year)
+
+p
+```
+
+Run statistical testing of the trendlines. It is probably a better metric to claim whether the cohort is more or less healthier for one phenotype as this is normalized by patients tested for that phenotype. 
+
+```{r output.max=-1}
+trendline_lm_test <- observed_divide_tested_all_by_year %>% 
+  filter(distancetoroot == 1) %>% 
+  filter(lab_year > 2000) %>%
+  rename(fraction = frac_observed_tested) %>%
+  select(termid, lab_year, label, fraction) %>% 
+  group_by(termid, label) %>% 
+  nest() %>% 
+  mutate(lm_model = map(data, function(d) lm(fraction ~ lab_year, data = d))) %>%
+  mutate(lm_coeff = map(lm_model, broom::tidy)) %>%
+  select(-data, -lm_model) %>% 
+  unnest(lm_coeff) %>% 
+  filter(term == 'lab_year') %>% 
+  mutate(p.value.bonferroni = p.value * 11)
+  
+trendline_lm_test_formatted <- trendline_lm_test %>% select(termid, label, estimate, p.value, p.value.bonferroni) %>% 
+  arrange(p.value.bonferroni) %>%
+  rename(beta = estimate) %>% 
+  mutate(significance = symnum(p.value.bonferroni, cutpoints = c(0, 0.001, 0.01, 0.05, 0.1, Inf), symbols = c("***", "**", "*", ".", " ")) ) %>% 
+  mutate(across(.cols = function(x) is.double(x), function(x) scales::scientific(x, digits = 3)))
+  
+
+write.csv(trendline_lm_test_formatted, file = glue('{OUT_DIR}/table_observed_normalized_by_tested_phenotypes_by_year_level_1_normalized_trendline_lm_model.csv'), row.names=FALSE)
+
+trendline_lm_test_formatted
+```
+
+In the last section, we show two sets of phenotypes. Set 1, those phenotype trend lower when looking at observed phenotypes only; Set 2, those phenotype trend higher when looking at observed phenotypes only. 
+
+The terms have significantly decreased trendlines when looking at patient counts of observed phenotypes. 
+```{r}
+hp_terms_of_interest <- c('HP:0001871','HP:0002715','HP:0025031','HP:0001626')
+p <- plot_phenotypes_of_interest_by_year(terms_of_interest = hp_terms_of_interest, df=observed_divide_tested_all_by_year)
+
+ggsave2(filenames = c(glue('{OUT_DIR}/plot_observed_by_tested_set1.png'), glue('{OUT_DIR}/plot_observed_by_tested_set1.pdf')), plot = p, width = 8, height = 4)
+
+p
+```
+
+The terms have significantly increased trendlines when looking at patient counts of observed phenotypes. 
+```{r}
+hp_terms_of_interest <- c('HP:0000119','HP:0001939')
+p <- plot_phenotypes_of_interest_by_year(terms_of_interest = hp_terms_of_interest, df=observed_divide_tested_all_by_year)
+
+ggsave2(filenames = c(glue('{OUT_DIR}/plot_observed_by_tested_set2.png'), glue('{OUT_DIR}/plot_observed_by_tested_set2.pdf')), plot = p, width = 8, height = 4)
+
+p
+```
+

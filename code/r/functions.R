@@ -22,3 +22,21 @@ get_df_from_db_or_cache <- function(cache_dir, file_name,
   # data.table::fread is typically preferred
   df <- data.table::fread(df_path, ...)
 }
+
+
+#' my default theme
+theme_az <- function(){
+  theme_bw() + 
+    theme(panel.grid = element_blank(), legend.position = "right", 
+          axis.title = element_text(size = 8), 
+          axis.text = element_text(size = 8), 
+          legend.text = element_text(size = 8), legend.title = element_text(size = 10))
+}
+
+#' my ggsave
+#' it extends ggplot2::ggsave by saving one plot to multiple files
+ggsave2 <- function(filenames, ...){
+  for (filename in filenames){
+    ggsave(filename, ...)
+  }
+}

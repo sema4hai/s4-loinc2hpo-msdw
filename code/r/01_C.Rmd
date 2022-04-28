@@ -1,0 +1,106 @@
+---
+title: "01_B_racial_disparity_observed_normalized_by_tested"
+output: html_document
+date: '2022-04-28'
+author: Aaron Zhang
+---
+
+This is another small extension for the main analysis of "01_MSDW_HPO_Phenotype_Analysis.Rmd". 
+The goal is to analyze the trendlines of observed phenotypes for each race but now normalize by how many patients were tested for each corresponding phenotype. 
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(tidyverse)
+library(glue)
+source('functions.R')
+```
+
+
+## load data
+```{r}
+# cache directory to read from or write to
+CACHE_DIR = '../../cache'
+if (!dir.exists(CACHE_DIR)){
+  dir.create(CACHE_DIR)
+}
+
+# output directory to write analysis results
+OUT_DIR = '../../out'
+if (!dir.exists(OUT_DIR)){
+  dir.create(OUT_DIR)
+}
+
+IN_DIR = '../../in'
+
+observed_phenotype_rank_all_by_year_race_sex <- read_csv(glue('{CACHE_DIR}/observed_phenotype_rank_all_by_year_race_sex.csv'))
+tested_phenotype_rank_all_by_race_year_sex <- read_csv(glue('{CACHE_DIR}/tested_phenotype_rank_all_by_race_year_sex.csv'))
+hp_term_list <- read.csv(glue('{IN_DIR}/hp_term_list.csv'), header = FALSE, col.names = c('termid', 'distancetoroot', 'label'))
+```
+
+## analysis
+Calculate fraction of patients observed for each phenotype by patients tested for that phenotype. 
+
+```{r}
+observed_phenotype_rank_all_by_year_race <- observed_phenotype_rank_all_by_year_race_sex %>% 
+  group_by(termid, lab_year, race) %>%
+  summarise(n_patient_observed = sum(n_patient), .groups = 'drop')
+
+tested_phenotype_rank_all_by_race_year <- tested_phenotype_rank_all_by_race_year_sex %>%
+  group_by(termid, lab_year, race) %>%
+  summarise(n_patient_tested = sum(n_patient), .groups = 'drop')
+```
+
+
+
+```{r}
+observed_normalized_by_tested_all_year_race <- observed_phenotype_rank_all_by_year_race %>% 
+  left_join(tested_phenotype_rank_all_by_race_year, by = c('termid', 'lab_year', 'race')) %>%
+  mutate(frac_observed_tested = n_patient_observed / n_patient_tested)
+
+observed_normalized_by_tested_all_year_race <- observed_normalized_by_tested_all_year_race %>% 
+  left_join(hp_term_list, by = 'termid')
+```
+
+Below, we plot level HPO terms.
+```{r}
+plot_phenotypes_of_interest_by_year <- function(terms_of_interest, df){
+  hpo_terms_selected <- df %>% filter(termid %in% terms_of_interest) %>% select(termid, label) %>% distinct()
+  
+  y_str = 'frac_observed_tested'
+  y_label = 'patient fraction (observed / tested)'
+  
+  df <- df %>% mutate(termid_label = str_c(label, glue('[{termid}]'), sep = '\n'))
+
+  p <- df %>% filter(termid %in% terms_of_interest) %>% 
+    filter(lab_year <= 2019 & lab_year > 2000) %>%
+    #ggplot(aes(x = lab_year, y = eval(parse(text=y_str)), group = termid, color = termid)) + 
+    ggplot(aes(x = lab_year, y = eval(parse(text=y_str)), group = race, color = race)) +
+    geom_point() +
+    geom_line() +
+    #scale_color_discrete(breaks = hpo_terms_selected$termid, labels = str_c(hpo_terms_selected$termid, hpo_terms_selected$label, sep = " ")) +
+    xlab('Year') +
+    ylab(y_label) +
+    theme_az() + 
+    facet_wrap(~termid_label, ncol = 2)
+  
+  return (p)
+}
+```
+
+```{r}
+hpo_level_1_terms <- observed_normalized_by_tested_all_year_race %>% filter(distancetoroot == 1) %>% select(termid, label) %>% distinct()
+
+p <- plot_phenotypes_of_interest_by_year(terms_of_interest = hpo_level_1_terms$termid, df=observed_normalized_by_tested_all_year_race %>% filter(race %in% c('White', 'Black or African American', 'Asian')))
+
+
+ggsave2(filenames = c(glue('{OUT_DIR}/plot_racial_difference_observed_normalized_by_tested.png'), glue('{OUT_DIR}/plot_racial_difference_observed_normalized_by_tested.pdf')), width=8, height = 10)
+```
+
+The plot shows racial differences of observed phenotypes.
+
+![racial differences](./../../out/plot_racial_difference_observed_normalized_by_tested.png)
+
+

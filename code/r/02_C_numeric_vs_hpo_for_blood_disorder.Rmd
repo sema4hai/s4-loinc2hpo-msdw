@@ -6,7 +6,7 @@ output:
 ---
 
 ## Goal
-Compare the performance of raw lab values vs HPO interpretations for seme blood disorders
+Compare the performance of raw lab values vs HPO interpretations for some blood disorders
 
 
 ## Analysis
@@ -21,18 +21,34 @@ require(DBI)
 require(RPostgres)
 require(egg)
 require(gridExtra)
-source('.db_credential.R')
+require(caret)
+require(broom)
+require(pROC)
 source('functions.R')
-dsca <- DBI::dbConnect(RPostgres::Postgres(), host='localhost', user=user, dbname = dbname, port = 2345, password=password)
+dsca <- DBI::dbConnect(RPostgres::Postgres(), 
+                       host=Sys.getenv('DSCA_PHI_HOST'), 
+                       dbname = Sys.getenv('DSCA_PHI_DBNAME'), 
+                       port = Sys.getenv('DSCA_PHI_PORT'), 
+                       user=Sys.getenv('DSCA_PHI_USERNAME'),
+                       password= Sys.getenv('DSCA_PHI_PASSWORD'))
 
 
 # cache directory to read from or write to
-CACHE_DIR <- './cache'
+CACHE_DIR = '../../cache'
+
 if (!dir.exists(CACHE_DIR)){
   dir.create(CACHE_DIR)
 }
 
-FORCE_RERUN <- TRUE
+# output directory to write analysis results
+OUT_DIR = '../../out'
+if (!dir.exists(OUT_DIR)){
+  dir.create(OUT_DIR)
+}
+
+# if true, ignore cached data and reconnect to database to get latest data;
+# otherwise, use cached data first before trying to connect to database
+FORCE_RERUN <- FALSE
 ```
 
 
@@ -120,10 +136,10 @@ p4 <- plot_lab_raw_values_vs_rel_date(lab_loinc = '751-8', ylim = c(0, 25)) + gg
 
 p <- gridExtra::arrangeGrob(p1, p2, p3, p4, ncol = 2)
 
-ggsave(filename = 'cache/anemia_labs_raw_data_distribution_by_rel_date.png', plot = p, width = 5, height = 5)
+ggsave2(filenames = c(glue('{OUT_DIR}/anemia_labs_raw_data_distribution_by_rel_date.png'), glue('{OUT_DIR}/anemia_labs_raw_data_distribution_by_rel_date.pdf')), plot = p, width = 5, height = 5)
 ```
 
-![liver function labs](./cache/anemia_labs_raw_data_distribution_by_rel_date.png)
+![liver function labs](./../../out/anemia_labs_raw_data_distribution_by_rel_date.png)
 
 
 Use -180 as the time cutoff and separate the patient journey into two sections: 0 - 180 days before the first diagnosis of abnormal liver function, and 180 days before the first diagnosis of liver abnormal functions. Within each section, we will pick the latest lab measurement for each LOINC lab test (features) and assign either + (within 180 days) or - outcome (outside of 180 days). 
@@ -161,10 +177,6 @@ df_labs_and_outcomes %>% group_by(loinc, outcome) %>% summarise(n = n())
 Define a list of functions to run statistical comparisons. 
 
 ```{r}
-require(caret)
-require(broom)
-require(pROC)
-
 # preprocess: convert the HPO column (and the isnegated column) into three separate features:
 # is_hpoterm_observed_for_H, is_hpoterm_observed_for_L and is_hpoterm_observed_for_N
 # pass in the dataframe of lab tests of one LOINC, return a new dataframe with the three new features
@@ -264,7 +276,7 @@ anemia_analysis <- df_labs_and_outcomes %>%
   select(-data) %>%
   unnest(result)
 
-write.csv(anemia_analysis, file = 'cache/anemia_analysis.csv', row.names = FALSE)
+write.csv(anemia_analysis, file = glue('{OUT_DIR}/anemia_analysis.csv'), row.names = FALSE)
 
 anemia_analysis
 ```
