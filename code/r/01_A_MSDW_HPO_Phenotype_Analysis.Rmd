@@ -620,10 +620,7 @@ plot_phenotypes_of_interest_by_year <- function(terms_of_interest, df, normalize
     scale_color_discrete(breaks = hpo_terms_selected$termid, labels = str_c(hpo_terms_selected$termid, hpo_terms_selected$label, sep = " ")) +
     xlab('Year') +
     ylab(y_label) +
-    theme_bw() +
-    theme(panel.grid = element_blank(),
-        axis.title = element_text(size = 8), axis.text = element_text(size = 8), 
-        legend.text = element_text(size = 8), legend.title = element_text(size = 10))
+    theme_az()
   
   return (p)
 }
